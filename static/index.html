@@ -37,6 +37,7 @@
     padding: 48px 16px;
   }
   .wrap { width: 100%; max-width: 640px; }
+  .wrap.wide { max-width: 880px; }
   h1 {
     font-size: 1.5rem;
     margin: 0 0 4px;
@@ -209,6 +210,46 @@
   }
   .loading.visible { display: block; }
 
+  .nodes-table-wrap {
+    margin-top: 28px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 20px;
+    display: none;
+  }
+  .nodes-table-wrap.visible { display: block; }
+  .nodes-summary {
+    font-size: 0.9rem;
+    color: var(--muted);
+    margin-bottom: 14px;
+  }
+  .table-scroll { overflow-x: auto; }
+  .nodes-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    white-space: nowrap;
+  }
+  .nodes-table th {
+    text-align: left;
+    color: var(--muted);
+    font-weight: 600;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .nodes-table td {
+    padding: 10px;
+    border-bottom: 1px solid var(--border);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .nodes-table tr:last-child td { border-bottom: none; }
+  .nodes-table td.error-cell {
+    color: #dc2626;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    white-space: normal;
+  }
+
   footer {
     text-align: center;
     color: var(--muted);
@@ -218,7 +259,7 @@
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap" id="wrap">
   <h1>IP 纯净度检测</h1>
   <p class="subtitle">查看 IP / 域名 / Clash 节点出口 IP 的来源、属性与 IPPure 纯净度系数</p>
 
@@ -237,10 +278,10 @@
 
   <div id="panel-node" class="panel">
     <div class="node-card">
-      <textarea id="node-config" placeholder="粘贴单个 Clash 节点配置，例如：&#10;- { name: '🇸🇬新加坡', type: vless, server: example.com, port: 443, uuid: xxxx, ... }"></textarea>
+      <textarea id="node-config" placeholder="粘贴一个或多个 Clash 节点配置（每行一个），例如：&#10;- { name: '🇸🇬新加坡', type: vless, server: example.com, port: 443, uuid: xxxx, ... }&#10;- { name: '🇬🇧英国', type: anytls, server: example.com, port: 443, password: xxxx, ... }"></textarea>
       <button id="submit-node">检测节点出口 IP</button>
     </div>
-    <div class="hint">会实际用该节点连接一次外网以获取真实出口 IP，耗时略久属正常现象</div>
+    <div class="hint">会实际用每个节点连接一次外网以获取真实出口 IP；多节点会并发检测，耗时略久属正常现象（最多 20 个）</div>
   </div>
 
   <div id="loading" class="loading">正在检测，请稍候...</div>
@@ -292,6 +333,25 @@
     </div>
   </div>
 
+  <div id="nodes-table-wrap" class="nodes-table-wrap">
+    <div class="nodes-summary" id="nodes-summary"></div>
+    <div class="table-scroll">
+      <table class="nodes-table">
+        <thead>
+          <tr>
+            <th>节点名称</th>
+            <th>协议</th>
+            <th>出口 IP</th>
+            <th>IP 来源</th>
+            <th>IP 属性</th>
+            <th>IPPure 系数</th>
+          </tr>
+        </thead>
+        <tbody id="nodes-table-body"></tbody>
+      </table>
+    </div>
+  </div>
+
   <footer>Self-hosted IP Purity Checker · 命令行工具见 cli.py</footer>
 </div>
 
@@ -300,6 +360,14 @@ const $ = (id) => document.getElementById(id);
 const loadingEl = $('loading');
 const errorEl = $('error');
 const resultEl = $('result');
+const nodesTableEl = $('nodes-table-wrap');
+const wrapEl = $('wrap');
+
+function hideAllResults() {
+  resultEl.classList.remove('visible');
+  nodesTableEl.classList.remove('visible');
+  wrapEl.classList.remove('wide');
+}
 
 // --- tabs ---
 document.querySelectorAll('.tab-btn').forEach((btn) => {
@@ -309,7 +377,7 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
     btn.classList.add('active');
     $('panel-' + btn.dataset.tab).classList.add('active');
     clearError();
-    resultEl.classList.remove('visible');
+    hideAllResults();
   });
 });
 
@@ -321,7 +389,7 @@ function setLoading(on) {
 function showError(msg) {
   errorEl.textContent = msg;
   errorEl.classList.add('visible');
-  resultEl.classList.remove('visible');
+  hideAllResults();
 }
 
 function clearError() {
@@ -377,7 +445,7 @@ async function runIpDetect() {
   if (!target) return showError('请输入 IP 或域名');
   clearError();
   setLoading(true);
-  resultEl.classList.remove('visible');
+  hideAllResults();
 
   try {
     const data = await callApi('/api/detect', { target });
@@ -399,28 +467,86 @@ async function runIpDetect() {
   }
 }
 
+function renderNodesTable(data) {
+  $('nodes-summary').textContent = `共 ${data.total} 个节点，成功 ${data.success_count} 个`;
+  const tbody = $('nodes-table-body');
+  tbody.innerHTML = '';
+
+  for (const r of data.results) {
+    const tr = document.createElement('tr');
+
+    if (!r.success) {
+      tr.innerHTML = `
+        <td>${escapeHtml(r.node_name || '-')}</td>
+        <td>${escapeHtml(r.node_type || '-')}</td>
+        <td colspan="4" class="error-cell">失败: ${escapeHtml(r.error || '未知错误')}</td>
+      `;
+      tbody.appendChild(tr);
+      continue;
+    }
+
+    const scoreText = r.ippure_raw || '暂不可用';
+    const scoreColor = r.ippure_score != null ? scoreGradientColor(r.ippure_score) : 'var(--muted)';
+
+    tr.innerHTML = `
+      <td>${escapeHtml(r.node_name || '-')}</td>
+      <td>${escapeHtml(r.node_type || '-')}</td>
+      <td>${escapeHtml(r.egress_ip || '-')}</td>
+      <td><span class="tag" style="background:${tagColor(r.ip_source)}">${escapeHtml(r.ip_source || '未知')}</span></td>
+      <td><span class="tag" style="background:${tagColor(r.ip_attribute)}">${escapeHtml(r.ip_attribute || '未知')}</span></td>
+      <td style="color:${scoreColor}; font-weight:600;">${escapeHtml(scoreText)}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+
+  wrapEl.classList.add('wide');
+  nodesTableEl.classList.add('visible');
+}
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
+
+function scoreGradientColor(score) {
+  if (score <= 15) return '#166534';
+  if (score <= 25) return '#22c55e';
+  if (score <= 40) return '#84cc16';
+  if (score <= 50) return '#eab308';
+  if (score <= 70) return '#f97316';
+  return '#dc2626';
+}
+
 async function runNodeDetect() {
   const config = $('node-config').value.trim();
   if (!config) return showError('请粘贴 Clash 节点配置');
   clearError();
   setLoading(true);
-  resultEl.classList.remove('visible');
+  hideAllResults();
 
   try {
-    const data = await callApi('/api/detect-node', { node: config });
+    const data = await callApi('/api/detect-nodes', { nodes: config });
 
-    $('row-input').style.display = 'none';
-    $('row-node-name').style.display = '';
-    $('row-node-type').style.display = '';
-    $('row-node-server').style.display = '';
+    if (data.total === 1) {
+      const r = data.results[0];
+      if (!r.success) throw new Error(r.error || '检测失败');
 
-    $('val-node-name').textContent = data.node_name || '-';
-    $('val-node-type').textContent = data.node_type || '-';
-    $('val-node-server').textContent = `${data.node_server}:${data.node_port}`;
-    $('val-ip').textContent = data.egress_ip;
-    renderPurity(data);
+      $('row-input').style.display = 'none';
+      $('row-node-name').style.display = '';
+      $('row-node-type').style.display = '';
+      $('row-node-server').style.display = '';
 
-    resultEl.classList.add('visible');
+      $('val-node-name').textContent = r.node_name || '-';
+      $('val-node-type').textContent = r.node_type || '-';
+      $('val-node-server').textContent = `${r.node_server}:${r.node_port}`;
+      $('val-ip').textContent = r.egress_ip;
+      renderPurity(r);
+
+      resultEl.classList.add('visible');
+    } else {
+      renderNodesTable(data);
+    }
   } catch (e) {
     showError(e.message || '检测失败，请稍后重试');
   } finally {

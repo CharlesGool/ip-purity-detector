@@ -78,6 +78,10 @@ class NodeDetectRequest(BaseModel):
     node: str
 
 
+class NodesDetectRequest(BaseModel):
+    nodes: str
+
+
 def resolve_to_ip(target: str) -> str:
     target = target.strip()
     try:
@@ -198,6 +202,41 @@ async def detect(req: DetectRequest):
     }
 
 
+async def _detect_single_node(node: dict) -> dict:
+    base = {
+        "node_name": node.get("name"),
+        "node_type": node.get("type"),
+        "node_server": node.get("server"),
+        "node_port": node.get("port"),
+    }
+
+    async with _node_semaphore:
+        try:
+            probe = await asyncio.to_thread(clash_probe.probe_node_egress_ip, node)
+        except clash_probe.NodeProbeError as e:
+            return {**base, "success": False, "error": str(e)}
+
+    ip = probe["egress_ip"]
+    base["node_name"] = probe.get("node_name")
+    base["egress_ip"] = ip
+
+    try:
+        data = await get_purity_with_retry(ip)
+    except HTTPException as e:
+        return {**base, "success": False, "error": str(e.detail)}
+
+    score, label = parse_score(data.get("scoreText"))
+    return {
+        **base,
+        "success": True,
+        "ip_source": data.get("source"),
+        "ip_attribute": data.get("attribute"),
+        "ippure_score": score,
+        "ippure_label": label,
+        "ippure_raw": data.get("scoreText"),
+    }
+
+
 @app.post("/api/detect-node")
 async def detect_node(req: NodeDetectRequest):
     try:
@@ -205,27 +244,24 @@ async def detect_node(req: NodeDetectRequest):
     except clash_probe.NodeProbeError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    async with _node_semaphore:
-        try:
-            probe = await asyncio.to_thread(clash_probe.probe_node_egress_ip, node)
-        except clash_probe.NodeProbeError as e:
-            raise HTTPException(status_code=502, detail=str(e))
+    result = await _detect_single_node(node)
+    if not result.get("success"):
+        raise HTTPException(status_code=502, detail=result.get("error", "检测失败"))
+    return result
 
-    ip = probe["egress_ip"]
-    data = await get_purity_with_retry(ip)
-    score, label = parse_score(data.get("scoreText"))
 
+@app.post("/api/detect-nodes")
+async def detect_nodes(req: NodesDetectRequest):
+    try:
+        nodes = clash_probe.parse_nodes(req.nodes)
+    except clash_probe.NodeProbeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    results = await asyncio.gather(*(_detect_single_node(n) for n in nodes))
     return {
-        "node_name": probe.get("node_name"),
-        "node_type": probe.get("node_type"),
-        "node_server": probe.get("node_server"),
-        "node_port": probe.get("node_port"),
-        "egress_ip": ip,
-        "ip_source": data.get("source"),
-        "ip_attribute": data.get("attribute"),
-        "ippure_score": score,
-        "ippure_label": label,
-        "ippure_raw": data.get("scoreText"),
+        "total": len(results),
+        "success_count": sum(1 for r in results if r.get("success")),
+        "results": results,
     }
 
 

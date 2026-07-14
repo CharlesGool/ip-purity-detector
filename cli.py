@@ -8,8 +8,8 @@ its own for every invocation.
 Examples:
     ./cli.py ip 8.8.8.8
     ./cli.py ip example.com --json
-    ./cli.py node -f node.yaml
-    cat node.yaml | ./cli.py node
+    ./cli.py node -f node.yaml                      # single or many nodes
+    cat nodes.yaml | ./cli.py node                   # batch, piped in
     ./cli.py node "- { name: 'sg', type: vless, server: 1.2.3.4, port: 443, ... }"
 """
 import argparse
@@ -86,6 +86,56 @@ def print_node_result(data: dict):
     ])
 
 
+def _truncate(s: str, width: int) -> str:
+    return s if len(s) <= width else s[: width - 1] + "…"
+
+
+def print_nodes_table(data: dict):
+    results = data["results"]
+    print(colorize(f"Clash 节点批量检测结果  ({data['success_count']}/{data['total']} 成功)", BOLD))
+    print()
+
+    cols = [
+        ("节点名称", 22),
+        ("协议", 8),
+        ("出口 IP", 16),
+        ("IP 来源", 10),
+        ("IP 属性", 10),
+        ("IPPure 系数", 14),
+    ]
+    header = "  ".join(_truncate(name, w).ljust(w) for name, w in cols)
+    print(header)
+    print("-" * len(header))
+
+    for r in results:
+        name = _truncate(r.get("node_name") or "-", cols[0][1])
+        proto = _truncate(r.get("node_type") or "-", cols[1][1])
+        if not r.get("success"):
+            row = f"{name.ljust(cols[0][1])}  {proto.ljust(cols[1][1])}  " + colorize(
+                _truncate("失败: " + (r.get("error") or "未知错误"), 60), "\033[31m"
+            )
+            print(row)
+            continue
+
+        ip = _truncate(r.get("egress_ip") or "-", cols[2][1])
+        source = _truncate(r.get("ip_source") or "未知", cols[3][1])
+        attr = _truncate(r.get("ip_attribute") or "未知", cols[4][1])
+        score_display = r.get("ippure_raw") or "暂不可用"
+        label = r.get("ippure_label")
+        color = COLOR_BY_LABEL.get(label, "") if label else ""
+        score_cell = colorize(_truncate(score_display, cols[5][1]), color) if color else _truncate(score_display, cols[5][1])
+
+        row = "  ".join([
+            name.ljust(cols[0][1]),
+            proto.ljust(cols[1][1]),
+            ip.ljust(cols[2][1]),
+            source.ljust(cols[3][1]),
+            attr.ljust(cols[4][1]),
+            score_cell,
+        ])
+        print(row)
+
+
 def request(url: str, path: str, payload: dict, timeout: float) -> dict:
     try:
         resp = requests.post(f"{url.rstrip('/')}{path}", json=payload, timeout=timeout)
@@ -135,11 +185,17 @@ def cmd_node(args):
         )
         sys.exit(1)
 
-    data = request(args.url, "/api/detect-node", {"node": text}, timeout=args.timeout)
+    data = request(args.url, "/api/detect-nodes", {"nodes": text}, timeout=args.timeout)
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))
+    elif data["total"] == 1:
+        result = data["results"][0]
+        if not result.get("success"):
+            print(f"错误: {result.get('error')}", file=sys.stderr)
+            sys.exit(1)
+        print_node_result(result)
     else:
-        print_node_result(data)
+        print_nodes_table(data)
 
 
 def main():
@@ -154,7 +210,7 @@ def main():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--url", default=DEFAULT_URL, help=f"服务地址，默认 {DEFAULT_URL}（可用环境变量 IPDETECT_URL 设置）")
     common.add_argument("--json", action="store_true", help="输出原始 JSON 而非表格")
-    common.add_argument("--timeout", type=float, default=60.0, help="请求超时时间（秒），默认 60")
+    common.add_argument("--timeout", type=float, default=180.0, help="请求超时时间（秒），默认 180（批量检测节点较慢，需要更长超时）")
 
     sub = parser.add_subparsers(dest="cmd", required=True)
 

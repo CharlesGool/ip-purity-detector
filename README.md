@@ -81,10 +81,10 @@ pip install requests
 python3 cli.py ip 8.8.8.8
 python3 cli.py ip example.com --json          # 输出原始 JSON
 
-# 检测 Clash 节点（三种传参方式任选）
+# 检测 Clash 节点（单个或批量都行，三种传参方式任选）
 python3 cli.py node "- { name: 'sg', type: vless, server: 1.2.3.4, port: 443, ... }"
-python3 cli.py node -f node.yaml
-cat node.yaml | python3 cli.py node
+python3 cli.py node -f nodes.yaml          # 文件里可以是一个节点，也可以是一整份节点列表
+cat nodes.yaml | python3 cli.py node       # 批量时会打印表格，单个节点仍是详情视图
 
 # 连接远程部署的服务
 python3 cli.py ip 8.8.8.8 --url http://192.168.1.10:8000
@@ -124,7 +124,7 @@ Content-Type: application/json
   渲染不出来；此时 `ippure_score`/`ippure_label`/`ippure_raw` 会是 `null`，但
   `ip_source`/`ip_attribute` 仍正常返回。前端会显示为“暂不可用”。
 
-### 检测 Clash 节点
+### 检测单个 Clash 节点
 
 ```
 POST /api/detect-node
@@ -160,6 +160,37 @@ mihomo 自身报出的具体原因，例如：
 { "detail": "无法通过该节点访问外网: [TCP] dial PROXY ... connect error: context deadline exceeded" }
 ```
 
+### 批量检测多个 Clash 节点
+
+```
+POST /api/detect-nodes
+Content-Type: application/json
+
+{ "nodes": "- { name: 'sg', ... }\n- { name: 'uk', ... }\n- { name: 'jp', ... }" }
+```
+
+`nodes` 字段接受一份多行的节点列表（YAML list，也支持一整份带 `proxies:` 的 Clash 配置，
+此时会探测其中全部节点）。每次最多 20 个（`MAX_BATCH_NODES`），按
+`MAX_NODE_CONCURRENCY`（默认 2）的并发度逐个探测，单个节点失败不影响其他节点，
+返回结果里每条都带 `success` 标记：
+
+```json
+{
+  "total": 5,
+  "success_count": 2,
+  "results": [
+    { "node_name": "uk", "node_type": "anytls", "node_server": "...", "node_port": 40251,
+      "success": false, "error": "无法通过该节点访问外网: ..." },
+    { "node_name": "ar", "node_type": "anytls", "node_server": "...", "node_port": 40254,
+      "egress_ip": "103.xx.xx.xx", "success": true,
+      "ip_source": "原生IP", "ip_attribute": "机房IP",
+      "ippure_score": 81, "ippure_label": "极度风险", "ippure_raw": "81% 极度风险" }
+  ]
+}
+```
+
+Web UI 的「Clash 节点检测」页会自动识别：粘贴一个节点显示详情卡片，粘贴多个则显示汇总表格。
+
 ## 已知限制
 
 - 依赖 ippure.com 的可用性和页面结构，如果对方大改版（class 名变化）需要同步更新
@@ -167,5 +198,6 @@ mihomo 自身报出的具体原因，例如：
 - 默认最多 3 个请求并发跑浏览器（`MAX_CONCURRENCY`），最多 2 个并发跑节点探测
   （`MAX_NODE_CONCURRENCY`），避免机器资源被打满；如需调高，改 `main.py` 顶部的常量。
 - 单次 IP/域名检测耗时约 3～5 秒，节点检测因为要等真实握手/超时，耗时可能到 10～20 秒，
+  批量检测多个节点时是并发跑的，总耗时约等于 `节点数 / MAX_NODE_CONCURRENCY` 个单节点耗时，
   都属正常现象。
-- Clash 节点检测只探测输入里的第一个节点，不会批量跑一整份订阅。
+- 批量检测一次最多 20 个节点，超过会直接报错拒绝，不做分批自动处理。

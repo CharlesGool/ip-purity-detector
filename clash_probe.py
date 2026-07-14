@@ -27,6 +27,7 @@ MIHOMO_BIN = (
 
 STARTUP_TIMEOUT = 8.0
 PROBE_TIMEOUT = 12.0
+MAX_BATCH_NODES = 20
 
 IP_ECHO_URLS = [
     "https://api.ipify.org",
@@ -39,7 +40,14 @@ class NodeProbeError(Exception):
     pass
 
 
-def parse_node(raw: str) -> dict:
+def parse_nodes(raw: str) -> list:
+    """Parse one or many Clash proxy nodes out of pasted YAML.
+
+    Accepts: a single flow-style node (`- { ... }` or `{ ... }`), a
+    multi-line list of nodes, or a full config containing a `proxies:`
+    list. Returns every well-formed node found (i.e. dicts with both
+    `type` and `server`), skipping anything else in the list silently.
+    """
     raw = (raw or "").strip()
     if not raw:
         raise NodeProbeError("请输入 Clash 节点配置")
@@ -49,20 +57,29 @@ def parse_node(raw: str) -> dict:
     except yaml.YAMLError as e:
         raise NodeProbeError(f"节点配置不是合法的 YAML: {e}")
 
-    node: Optional[Any] = None
+    candidates: list = []
     if isinstance(data, dict):
         if isinstance(data.get("proxies"), list) and data["proxies"]:
-            node = data["proxies"][0]
+            candidates = data["proxies"]
         elif "server" in data and "type" in data:
-            node = data
-    elif isinstance(data, list) and data:
-        node = data[0]
+            candidates = [data]
+    elif isinstance(data, list):
+        candidates = data
 
-    if not isinstance(node, dict) or "server" not in node or "type" not in node:
+    nodes = [n for n in candidates if isinstance(n, dict) and "server" in n and "type" in n]
+    if not nodes:
         raise NodeProbeError(
             "无法从输入中解析出有效的 Clash 节点（需要包含 type / server 等字段）"
         )
-    return node
+    if len(nodes) > MAX_BATCH_NODES:
+        raise NodeProbeError(
+            f"一次最多支持检测 {MAX_BATCH_NODES} 个节点（本次输入了 {len(nodes)} 个）"
+        )
+    return nodes
+
+
+def parse_node(raw: str) -> dict:
+    return parse_nodes(raw)[0]
 
 
 def _free_port() -> int:

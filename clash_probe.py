@@ -222,10 +222,31 @@ def _last_meaningful_log_line(out: str) -> str:
     return _clean_log_line(lines[-1]) if lines else ""
 
 
-def probe_node_egress_ip(node: dict, timeout: float = PROBE_TIMEOUT) -> dict:
-    """Blocking. Launch mihomo with a single-node config, return the egress
-    IP visible through it plus basic node metadata. Call via
-    asyncio.to_thread from async code."""
+class NodeProxyHandle:
+    """A running mihomo instance proxying through a single node.
+
+    Kept alive across the egress-IP probe and any follow-up checks (e.g. a
+    WebRTC leak test tunneled through the same local port) so callers don't
+    pay mihomo's startup cost twice. Must be closed via `.close()`.
+    """
+
+    def __init__(self, proc: subprocess.Popen, tmpdir: str, mixed_port: int):
+        self.proc = proc
+        self.tmpdir = tmpdir
+        self.mixed_port = mixed_port
+
+    def close(self):
+        with contextlib.suppress(Exception):
+            self.proc.terminate()
+            self.proc.wait(timeout=3)
+        with contextlib.suppress(Exception):
+            self.proc.kill()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+
+def start_node_proxy(node: dict) -> NodeProxyHandle:
+    """Blocking. Launch mihomo with a single-node config and wait for its
+    local mixed (HTTP/SOCKS) port to come up. Call via asyncio.to_thread."""
     if not Path(MIHOMO_BIN).exists():
         raise NodeProbeError(
             f"未找到 mihomo 可执行文件: {MIHOMO_BIN}（请运行 scripts/fetch_mihomo.sh 安装）"
@@ -243,46 +264,60 @@ def probe_node_egress_ip(node: dict, timeout: float = PROBE_TIMEOUT) -> dict:
         text=True,
     )
     try:
-        try:
-            _wait_port(mixed_port, STARTUP_TIMEOUT)
-        except NodeProbeError:
-            out = _drain(proc)
-            detail = _last_meaningful_log_line(out)
-            raise NodeProbeError(f"mihomo 启动失败: {detail or '未知原因'}")
-
-        proxies = {
-            "http": f"http://127.0.0.1:{mixed_port}",
-            "https": f"http://127.0.0.1:{mixed_port}",
-        }
-        last_err: Optional[Exception] = None
-        for url in IP_ECHO_URLS:
-            try:
-                resp = requests.get(url, proxies=proxies, timeout=timeout)
-                resp.raise_for_status()
-                ip = resp.text.strip()
-                family = socket.AF_INET6 if ":" in ip else socket.AF_INET
-                socket.inet_pton(family, ip)
-                return {
-                    "egress_ip": ip,
-                    "node_name": node.get("name"),
-                    "node_type": node.get("type"),
-                    "node_server": node.get("server"),
-                    "node_port": node.get("port"),
-                }
-            except Exception as e:  # noqa: BLE001 - tried next echo service below
-                last_err = e
-                continue
-
+        _wait_port(mixed_port, STARTUP_TIMEOUT)
+    except NodeProbeError:
         out = _drain(proc)
-        detail = _last_meaningful_log_line(out) or str(last_err)
-        raise NodeProbeError(f"无法通过该节点访问外网: {detail}")
-    finally:
-        with contextlib.suppress(Exception):
-            proc.terminate()
-            proc.wait(timeout=3)
-        with contextlib.suppress(Exception):
-            proc.kill()
+        detail = _last_meaningful_log_line(out)
         shutil.rmtree(tmpdir, ignore_errors=True)
+        raise NodeProbeError(f"mihomo 启动失败: {detail or '未知原因'}")
+
+    return NodeProxyHandle(proc, tmpdir, mixed_port)
+
+
+def fetch_egress_ip(handle: NodeProxyHandle, node: dict, timeout: float = PROBE_TIMEOUT) -> dict:
+    """Blocking. Ask a public IP-echo service what IP is visible through an
+    already-running node proxy. Call via asyncio.to_thread."""
+    proxies = {
+        "http": f"http://127.0.0.1:{handle.mixed_port}",
+        "https": f"http://127.0.0.1:{handle.mixed_port}",
+    }
+    last_err: Optional[Exception] = None
+    for url in IP_ECHO_URLS:
+        try:
+            resp = requests.get(url, proxies=proxies, timeout=timeout)
+            resp.raise_for_status()
+            ip = resp.text.strip()
+            family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+            socket.inet_pton(family, ip)
+            return {
+                "egress_ip": ip,
+                "node_name": node.get("name"),
+                "node_type": node.get("type"),
+                "node_server": node.get("server"),
+                "node_port": node.get("port"),
+            }
+        except Exception as e:  # noqa: BLE001 - tried next echo service below
+            last_err = e
+            continue
+
+    out = _drain(handle.proc)
+    detail = _last_meaningful_log_line(out) or str(last_err)
+    raise NodeProbeError(f"无法通过该节点访问外网: {detail}")
+
+
+def probe_node_egress_ip(node: dict, timeout: float = PROBE_TIMEOUT) -> dict:
+    """Blocking. Launch mihomo with a single-node config, return the egress
+    IP visible through it plus basic node metadata, then tear it down. Call
+    via asyncio.to_thread from async code.
+
+    Thin convenience wrapper around start_node_proxy + fetch_egress_ip for
+    callers that don't need the proxy kept alive afterwards.
+    """
+    handle = start_node_proxy(node)
+    try:
+        return fetch_egress_ip(handle, node, timeout=timeout)
+    finally:
+        handle.close()
 
 
 def _drain(proc: subprocess.Popen) -> str:

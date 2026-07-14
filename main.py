@@ -14,34 +14,123 @@ from playwright.async_api import async_playwright, Browser, Playwright
 import clash_probe
 
 IPPURE_URL = "https://ippure.com/?ip={ip}"
+IPPURE_HOME_URL = "https://ippure.com/"
 NAV_TIMEOUT_MS = 20000
 SELECTOR_TIMEOUT_MS = 15000
 MAX_CONCURRENCY = 3
 MAX_RETRIES = 2
 MAX_NODE_CONCURRENCY = 2
+WEBRTC_CHECK_TIMEOUT_MS = 15000
 
 # Resource types that only slow down the page without affecting the
 # text content we scrape (map tiles, ad images, fonts, etc).
 BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
 
-EXTRACT_JS = """
-() => {
-    function infoValue(label) {
-        const keys = Array.from(document.querySelectorAll('.info-key'));
-        const key = keys.find(el => el.textContent.trim() === label);
-        if (!key) return null;
-        const row = key.parentElement;
-        const valueEl = row.querySelector('.info-value');
-        return valueEl ? valueEl.textContent.trim() : null;
+# Shared helpers used by both extraction scripts below. ippure's detail
+# table mixes two DOM shapes: a `.info-key` <span> sitting next to its
+# `.info-value` sibling (IP来源/IP属性), and a `.info-key` <div> whose
+# *entire value block* is the next sibling element (位置/泄露检测/the two
+# colormap score bars). scoreFor/asnInfo/locations/webrtcLeak below each
+# target one of those shapes.
+_JS_HELPERS = """
+    function textOf(el) {
+        return el ? el.textContent.replace(/\\s+/g, ' ').trim() : null;
     }
-    const scoreEl = document.querySelector('.colormap-indicator-value');
+    function findKey(label) {
+        return Array.from(document.querySelectorAll('.info-key'))
+            .find(el => el.textContent.trim() === label) || null;
+    }
+    function simpleValue(label) {
+        const key = findKey(label);
+        if (!key) return null;
+        const valueEl = key.parentElement.querySelector('.info-value');
+        return valueEl ? textOf(valueEl) : null;
+    }
+    function scoreFor(label) {
+        const key = findKey(label);
+        if (!key) return null;
+        const container = key.parentElement.nextElementSibling;
+        if (!container) return null;
+        const valEl = container.querySelector('.colormap-indicator-value');
+        return valEl ? textOf(valEl) : null;
+    }
+    function asnInfo() {
+        const key = findKey('ASN');
+        if (!key) return {};
+        const row = key.parentElement;
+        const mainVal = row.querySelector('.info-value');
+        const sub = {};
+        row.querySelectorAll('.ip-subtitle').forEach((subKey) => {
+            const label = textOf(subKey);
+            const valEl = subKey.parentElement.querySelector('.info-value');
+            sub[label] = valEl ? textOf(valEl) : null;
+        });
+        return {
+            asn: mainVal ? textOf(mainVal) : null,
+            as_domain: sub['AS域名'] || null,
+            ip_range: sub['IP范围'] || null,
+            bot_ratio_raw: sub['人机流量比'] || null,
+        };
+    }
+    function locations() {
+        const key = findKey('位置');
+        if (!key) return {};
+        const container = key.nextElementSibling;
+        const out = {};
+        if (container) {
+            Array.from(container.children).forEach((row) => {
+                const src = row.querySelector && row.querySelector('.geo-source');
+                const val = row.querySelector && row.querySelector('.info-value');
+                if (src && val) out[textOf(src)] = textOf(val);
+            });
+        }
+        return out;
+    }
+    function webrtcLeak() {
+        const key = findKey('泄露检测');
+        if (!key) return null;
+        const container = key.nextElementSibling;
+        if (!container) return null;
+        const row = Array.from(container.children).find((r) => {
+            const src = r.querySelector && r.querySelector('.geo-source');
+            return src && textOf(src) === 'WebRTC泄露';
+        });
+        if (!row) return null;
+        const values = Array.from(row.querySelectorAll('.info-value')).map(textOf).filter(Boolean);
+        if (values.length === 0 || values[0].includes('未检测到')) {
+            return { leaked: false, ip: null, location: null };
+        }
+        return { leaked: true, ip: values[0] || null, location: values[1] || null };
+    }
+"""
+
+# Full detail-table extraction: IP来源/IP属性/IPPure系数 plus everything
+# revealed by the "显示扩展" toggle (ASN/AS域名/IP范围/人机流量比, the
+# per-provider 位置 table, Cloudflare系数, and the WebRTC leak check).
+EXTRACT_JS = (
+    "() => {"
+    + _JS_HELPERS
+    + """
+    const asn = asnInfo();
     return {
-        source: infoValue('IP来源'),
-        attribute: infoValue('IP属性'),
-        scoreText: scoreEl ? scoreEl.textContent.trim() : null,
+        source: simpleValue('IP来源'),
+        attribute: simpleValue('IP属性'),
+        scoreText: scoreFor('IPPure系数'),
+        cloudflareScoreText: scoreFor('Cloudflare系数'),
+        asn: asn.asn,
+        as_domain: asn.as_domain,
+        ip_range: asn.ip_range,
+        bot_ratio_raw: asn.bot_ratio_raw,
+        locations: locations(),
+        webrtcLeak: webrtcLeak(),
     };
 }
 """
+)
+
+# Narrow extraction used for the tunnel-routed node WebRTC leak check: we
+# only care whether browsing through the node's proxy leaks a real IP.
+WEBRTC_LEAK_JS = "() => {" + _JS_HELPERS + "return webrtcLeak();}"
 
 _state: dict = {"playwright": None, "browser": None}
 _semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
@@ -52,7 +141,17 @@ _node_semaphore = asyncio.Semaphore(MAX_NODE_CONCURRENCY)
 async def lifespan(app: FastAPI):
     pw: Playwright = await async_playwright().start()
     browser: Browser = await pw.chromium.launch(
-        args=["--no-sandbox", "--disable-dev-shm-usage"]
+        args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            # Without a configured proxy this blocks WebRTC from leaking our
+            # own server's IP on plain (non-tunneled) lookups. With a
+            # per-context SOCKS5 proxy (node WebRTC leak check below) it
+            # forces WebRTC media to go through that proxy instead of
+            # bypassing it over a direct UDP interface, which is the whole
+            # point of testing for a leak.
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+        ]
     )
     _state["playwright"] = pw
     _state["browser"] = browser
@@ -144,6 +243,14 @@ async def fetch_purity(ip: str) -> dict:
                 await page.wait_for_selector(".colormap-indicator-value", timeout=5000)
             except Exception:
                 pass
+            # Cloudflare系数/位置详情/泄露检测 sit behind a "显示扩展" toggle.
+            # Best-effort: a missing/unclickable button just means those
+            # fields come back empty, same as any other optional field.
+            try:
+                await page.click(".expand-btn-container", timeout=3000)
+                await page.wait_for_timeout(2000)
+            except Exception:
+                pass
             return await page.evaluate(EXTRACT_JS)
         finally:
             await context.close()
@@ -156,6 +263,78 @@ def parse_score(score_text: Optional[str]):
     if not m:
         return None, score_text
     return int(m.group(1)), m.group(2).strip()
+
+
+def parse_bot_ratio(raw: Optional[str]):
+    if not raw:
+        return None, None
+    hm = re.search(r"human\s*([\d.]+)%", raw)
+    bm = re.search(r"bot\s*([\d.]+)%", raw)
+    human = float(hm.group(1)) if hm else None
+    bot = float(bm.group(1)) if bm else None
+    return human, bot
+
+
+def build_detail_fields(data: dict) -> dict:
+    """Map raw scraped ippure fields onto the API's response shape. Shared
+    by /api/detect and node detection since both go through fetch_purity."""
+    score, label = parse_score(data.get("scoreText"))
+    cf_score, cf_label = parse_score(data.get("cloudflareScoreText"))
+    human_pct, bot_pct = parse_bot_ratio(data.get("bot_ratio_raw"))
+    return {
+        "ip_source": data.get("source"),
+        "ip_attribute": data.get("attribute"),
+        "ippure_score": score,
+        "ippure_label": label,
+        "ippure_raw": data.get("scoreText"),
+        "cloudflare_score": cf_score,
+        "cloudflare_label": cf_label,
+        "cloudflare_raw": data.get("cloudflareScoreText"),
+        "asn": data.get("asn"),
+        "as_domain": data.get("as_domain"),
+        "ip_range": data.get("ip_range"),
+        "human_pct": human_pct,
+        "bot_pct": bot_pct,
+        "locations": data.get("locations") or {},
+    }
+
+
+async def check_node_webrtc_leak(mixed_port: int) -> dict:
+    """Browse through the node's own local proxy port and see whether
+    WebRTC leaks a real IP instead of staying inside the tunnel. Routed
+    through a per-context SOCKS5 proxy so mihomo (with udp: true on the
+    node) can relay the STUN traffic; the browser-wide
+    disable_non_proxied_udp policy (see lifespan) stops WebRTC from just
+    going out directly and bypassing the tunnel."""
+    browser: Browser = _state["browser"]
+    try:
+        context = await browser.new_context(
+            locale="zh-CN",
+            proxy={"server": f"socks5://127.0.0.1:{mixed_port}"},
+        )
+    except Exception as e:  # noqa: BLE001 - surfaced to the client as "unknown"
+        return {"leaked": None, "error": f"无法创建代理浏览器上下文: {e}"}
+
+    try:
+        page = await context.new_page()
+        await page.route("**/*", _block_heavy_resources)
+        await page.goto(
+            IPPURE_HOME_URL,
+            timeout=WEBRTC_CHECK_TIMEOUT_MS,
+            wait_until="domcontentloaded",
+        )
+        await page.wait_for_selector(".info-key", timeout=WEBRTC_CHECK_TIMEOUT_MS)
+        try:
+            await page.click(".expand-btn-container", timeout=3000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(2500)
+        result = await page.evaluate(WEBRTC_LEAK_JS)
+        return result if result is not None else {"leaked": None}
+    except Exception as e:  # noqa: BLE001 - best-effort, never fails the node probe
+        return {"leaked": None, "error": f"WebRTC 泄露检测失败: {e}"}
+    finally:
+        await context.close()
 
 
 async def get_purity_with_retry(ip: str) -> dict:
@@ -189,16 +368,15 @@ async def detect(req: DetectRequest):
 
     ip = resolve_to_ip(req.target)
     data = await get_purity_with_retry(ip)
-    score, label = parse_score(data.get("scoreText"))
 
     return {
         "input": req.target.strip(),
         "resolved_ip": ip,
-        "ip_source": data.get("source"),
-        "ip_attribute": data.get("attribute"),
-        "ippure_score": score,
-        "ippure_label": label,
-        "ippure_raw": data.get("scoreText"),
+        **build_detail_fields(data),
+        # Reflects our own server's browsing path (no proxy configured on
+        # this context), not the queried IP itself — see check_node_webrtc_leak
+        # for the version that actually matters, tunneled through a node.
+        "webrtc_leak": data.get("webrtcLeak"),
     }
 
 
@@ -212,28 +390,34 @@ async def _detect_single_node(node: dict) -> dict:
 
     async with _node_semaphore:
         try:
-            probe = await asyncio.to_thread(clash_probe.probe_node_egress_ip, node)
+            handle = await asyncio.to_thread(clash_probe.start_node_proxy, node)
         except clash_probe.NodeProbeError as e:
             return {**base, "success": False, "error": str(e)}
 
-    ip = probe["egress_ip"]
-    base["node_name"] = probe.get("node_name")
-    base["egress_ip"] = ip
+        try:
+            try:
+                probe = await asyncio.to_thread(clash_probe.fetch_egress_ip, handle, node)
+            except clash_probe.NodeProbeError as e:
+                return {**base, "success": False, "error": str(e)}
 
-    try:
-        data = await get_purity_with_retry(ip)
-    except HTTPException as e:
-        return {**base, "success": False, "error": str(e.detail)}
+            ip = probe["egress_ip"]
+            base["node_name"] = probe.get("node_name")
+            base["egress_ip"] = ip
 
-    score, label = parse_score(data.get("scoreText"))
+            try:
+                data = await get_purity_with_retry(ip)
+            except HTTPException as e:
+                return {**base, "success": False, "error": str(e.detail)}
+
+            webrtc_leak = await check_node_webrtc_leak(handle.mixed_port)
+        finally:
+            await asyncio.to_thread(handle.close)
+
     return {
         **base,
         "success": True,
-        "ip_source": data.get("source"),
-        "ip_attribute": data.get("attribute"),
-        "ippure_score": score,
-        "ippure_label": label,
-        "ippure_raw": data.get("scoreText"),
+        **build_detail_fields(data),
+        "webrtc_leak": webrtc_leak,
     }
 
 

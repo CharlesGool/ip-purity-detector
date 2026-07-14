@@ -261,7 +261,7 @@
 <body>
 <div class="wrap" id="wrap">
   <h1>IP 纯净度检测</h1>
-  <p class="subtitle">查看 IP / 域名 / Clash 节点出口 IP 的来源、属性与 IPPure 纯净度系数</p>
+  <p class="subtitle">查看 IP / 域名 / Clash 节点出口 IP 的 ASN、多源地理位置、人机流量比、IPPure/Cloudflare 系数与 WebRTC 泄露</p>
 
   <div class="tabs">
     <button class="tab-btn active" data-tab="ip">IP / 域名检测</button>
@@ -281,7 +281,7 @@
       <textarea id="node-config" placeholder="粘贴一个或多个 Clash 节点配置（每行一个），例如：&#10;- { name: '🇸🇬新加坡', type: vless, server: example.com, port: 443, uuid: xxxx, ... }&#10;- { name: '🇬🇧英国', type: anytls, server: example.com, port: 443, password: xxxx, ... }"></textarea>
       <button id="submit-node">检测节点出口 IP</button>
     </div>
-    <div class="hint">会实际用每个节点连接一次外网以获取真实出口 IP；多节点会并发检测，耗时略久属正常现象（最多 20 个）</div>
+    <div class="hint">会实际用每个节点连接一次外网以获取真实出口 IP，并检测该节点的 WebRTC 是否泄露真实 IP；多节点会并发检测，耗时略久属正常现象（最多 1000 个）</div>
   </div>
 
   <div id="loading" class="loading">正在检测，请稍候...</div>
@@ -308,6 +308,23 @@
       <span class="result-key">出口 IP</span>
       <span class="result-value" id="val-ip">-</span>
     </div>
+    <div class="result-row" id="row-asn" style="display:none;">
+      <span class="result-key">ASN</span>
+      <span class="result-value" id="val-asn">-</span>
+    </div>
+    <div class="result-row" id="row-as-domain" style="display:none;">
+      <span class="result-key">AS域名</span>
+      <span class="result-value" id="val-as-domain">-</span>
+    </div>
+    <div class="result-row" id="row-ip-range" style="display:none;">
+      <span class="result-key">IP范围</span>
+      <span class="result-value" id="val-ip-range">-</span>
+    </div>
+    <div class="result-row" id="row-bot-ratio" style="display:none;">
+      <span class="result-key">人机流量比</span>
+      <span class="result-value" id="val-bot-ratio">-</span>
+    </div>
+    <div id="locations-rows"></div>
     <div class="result-row">
       <span class="result-key">IP 来源</span>
       <span class="result-value" id="val-source">-</span>
@@ -321,7 +338,7 @@
         <span class="result-key">IPPure 系数</span>
         <span class="result-value" id="val-score">-</span>
       </div>
-      <div class="score-bar-wrap">
+      <div class="score-bar-wrap" id="score-bar-wrap">
         <div class="score-bar">
           <div class="score-dot" id="score-dot" style="left:0%"></div>
         </div>
@@ -330,6 +347,25 @@
           <span>100 风险</span>
         </div>
       </div>
+    </div>
+    <div style="margin-top:20px;">
+      <div class="result-row" style="border-bottom:none; padding-bottom:0;">
+        <span class="result-key">Cloudflare 系数</span>
+        <span class="result-value" id="val-cf-score">-</span>
+      </div>
+      <div class="score-bar-wrap" id="cf-score-bar-wrap">
+        <div class="score-bar">
+          <div class="score-dot" id="cf-score-dot" style="left:0%"></div>
+        </div>
+        <div class="score-scale">
+          <span>0 纯净</span>
+          <span>100 风险</span>
+        </div>
+      </div>
+    </div>
+    <div class="result-row" style="margin-top:8px; border-bottom:none;">
+      <span class="result-key">WebRTC 泄露</span>
+      <span class="result-value" id="val-webrtc">-</span>
     </div>
   </div>
 
@@ -345,6 +381,8 @@
             <th>IP 来源</th>
             <th>IP 属性</th>
             <th>IPPure 系数</th>
+            <th>Cloudflare 系数</th>
+            <th>WebRTC 泄露</th>
           </tr>
         </thead>
         <tbody id="nodes-table-body"></tbody>
@@ -413,20 +451,70 @@ function setTag(elId, text) {
   $(elId).appendChild(tag);
 }
 
+function setOptionalRow(rowId, valId, text) {
+  const show = text != null && text !== '';
+  $(rowId).style.display = show ? '' : 'none';
+  if (show) $(valId).textContent = text;
+}
+
+function renderScoreBar(valId, dotId, wrapId, score, raw) {
+  const wrap = $(wrapId);
+  if (score != null) {
+    $(valId).textContent = raw || (score + '%');
+    const pct = Math.max(0, Math.min(100, score));
+    $(dotId).style.left = pct + '%';
+    wrap.style.display = '';
+  } else {
+    $(valId).textContent = '暂不可用';
+    wrap.style.display = 'none';
+  }
+}
+
+function renderWebrtcLeak(leak) {
+  const el = $('val-webrtc');
+  if (!leak || leak.leaked == null) {
+    el.textContent = leak && leak.error ? `未知（${leak.error}）` : '未检测';
+    el.style.color = '';
+  } else if (leak.leaked) {
+    el.textContent = `泄露 -> ${leak.ip || '?'}${leak.location ? ' (' + leak.location + ')' : ''}`;
+    el.style.color = '#dc2626';
+  } else {
+    el.textContent = '未检测到泄露';
+    el.style.color = '#16a34a';
+  }
+}
+
+function renderLocations(locations) {
+  const container = $('locations-rows');
+  container.innerHTML = '';
+  if (!locations) return;
+  for (const [source, loc] of Object.entries(locations)) {
+    const row = document.createElement('div');
+    row.className = 'result-row';
+    row.innerHTML = `<span class="result-key">位置 (${escapeHtml(source)})</span><span class="result-value">${escapeHtml(loc)}</span>`;
+    container.appendChild(row);
+  }
+}
+
 function renderPurity(data) {
   setTag('val-source', data.ip_source);
   setTag('val-attr', data.ip_attribute);
 
-  const scoreBarWrap = document.querySelector('.score-bar-wrap');
-  if (data.ippure_score != null) {
-    $('val-score').textContent = data.ippure_raw || (data.ippure_score + '%');
-    const pct = Math.max(0, Math.min(100, data.ippure_score));
-    $('score-dot').style.left = pct + '%';
-    scoreBarWrap.style.display = '';
-  } else {
-    $('val-score').textContent = '暂不可用';
-    scoreBarWrap.style.display = 'none';
-  }
+  setOptionalRow('row-asn', 'val-asn', data.asn);
+  setOptionalRow('row-as-domain', 'val-as-domain', data.as_domain);
+  setOptionalRow('row-ip-range', 'val-ip-range', data.ip_range);
+  setOptionalRow(
+    'row-bot-ratio',
+    'val-bot-ratio',
+    (data.human_pct != null || data.bot_pct != null)
+      ? `human ${data.human_pct ?? '?'}% / bot ${data.bot_pct ?? '?'}%`
+      : null,
+  );
+  renderLocations(data.locations);
+
+  renderScoreBar('val-score', 'score-dot', 'score-bar-wrap', data.ippure_score, data.ippure_raw);
+  renderScoreBar('val-cf-score', 'cf-score-dot', 'cf-score-bar-wrap', data.cloudflare_score, data.cloudflare_raw);
+  renderWebrtcLeak(data.webrtc_leak);
 }
 
 async function callApi(path, body) {
@@ -479,7 +567,7 @@ function renderNodesTable(data) {
       tr.innerHTML = `
         <td>${escapeHtml(r.node_name || '-')}</td>
         <td>${escapeHtml(r.node_type || '-')}</td>
-        <td colspan="4" class="error-cell">失败: ${escapeHtml(r.error || '未知错误')}</td>
+        <td colspan="6" class="error-cell">失败: ${escapeHtml(r.error || '未知错误')}</td>
       `;
       tbody.appendChild(tr);
       continue;
@@ -487,6 +575,19 @@ function renderNodesTable(data) {
 
     const scoreText = r.ippure_raw || '暂不可用';
     const scoreColor = r.ippure_score != null ? scoreGradientColor(r.ippure_score) : 'var(--muted)';
+    const cfText = r.cloudflare_raw || '暂不可用';
+    const cfColor = r.cloudflare_score != null ? scoreGradientColor(r.cloudflare_score) : 'var(--muted)';
+
+    const leak = r.webrtc_leak || {};
+    let leakText = '未检测';
+    let leakColor = 'var(--muted)';
+    if (leak.leaked === true) {
+      leakText = '泄露';
+      leakColor = '#dc2626';
+    } else if (leak.leaked === false) {
+      leakText = '未泄露';
+      leakColor = '#16a34a';
+    }
 
     tr.innerHTML = `
       <td>${escapeHtml(r.node_name || '-')}</td>
@@ -495,6 +596,8 @@ function renderNodesTable(data) {
       <td><span class="tag" style="background:${tagColor(r.ip_source)}">${escapeHtml(r.ip_source || '未知')}</span></td>
       <td><span class="tag" style="background:${tagColor(r.ip_attribute)}">${escapeHtml(r.ip_attribute || '未知')}</span></td>
       <td style="color:${scoreColor}; font-weight:600;">${escapeHtml(scoreText)}</td>
+      <td style="color:${cfColor}; font-weight:600;">${escapeHtml(cfText)}</td>
+      <td style="color:${leakColor}; font-weight:600;">${escapeHtml(leakText)}</td>
     `;
     tbody.appendChild(tr);
   }

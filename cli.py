@@ -50,44 +50,84 @@ def print_kv(rows: list[tuple[str, str]]):
         print(f"  {k.ljust(width)} : {v}")
 
 
-def print_ip_result(data: dict):
+def _detail_rows(data: dict) -> list[tuple[str, str]]:
+    """Rows shared by the single IP result and single node result views:
+    ASN/位置/人机流量比/两个系数/WebRTC 泄露, mirroring ippure.com's own layout."""
+    rows = []
+
+    asn = data.get("asn")
+    if asn:
+        rows.append(("ASN", asn))
+    if data.get("as_domain"):
+        rows.append(("AS域名", data["as_domain"]))
+    if data.get("ip_range"):
+        rows.append(("IP范围", data["ip_range"]))
+    if data.get("human_pct") is not None or data.get("bot_pct") is not None:
+        h = data.get("human_pct")
+        b = data.get("bot_pct")
+        rows.append((
+            "人机流量比",
+            f"human {h}% / bot {b}%" if h is not None and b is not None else "-",
+        ))
+
+    for source, loc in (data.get("locations") or {}).items():
+        rows.append((f"位置({source})", loc))
+
+    rows.append(("IP 来源", data.get("ip_source") or "未知"))
+    rows.append(("IP 属性", data.get("ip_attribute") or "未知"))
+
     label = data.get("ippure_label")
     color = COLOR_BY_LABEL.get(label, "") if label else ""
     score_display = data.get("ippure_raw") or "暂不可用"
-    if color:
-        score_display = colorize(score_display, color)
+    rows.append(("IPPure 系数", colorize(score_display, color) if color else score_display))
 
+    cf_label = data.get("cloudflare_label")
+    cf_color = COLOR_BY_LABEL.get(cf_label, "") if cf_label else ""
+    cf_display = data.get("cloudflare_raw") or "暂不可用"
+    rows.append(("Cloudflare 系数", colorize(cf_display, cf_color) if cf_color else cf_display))
+
+    leak = data.get("webrtc_leak") or {}
+    if leak.get("leaked") is True:
+        leak_display = colorize(f"泄露 -> {leak.get('ip') or '?'} ({leak.get('location') or '未知位置'})", "\033[31m")
+    elif leak.get("leaked") is False:
+        leak_display = colorize("未检测到泄露", "\033[32m")
+    else:
+        leak_display = leak.get("error") or "未检测"
+    rows.append(("WebRTC 泄露", leak_display))
+
+    return rows
+
+
+def print_ip_result(data: dict):
     print(colorize("IP 纯净度检测结果", BOLD))
     print_kv([
         ("输入", data.get("input", "-")),
         ("出口 IP", data.get("resolved_ip", "-")),
-        ("IP 来源", data.get("ip_source") or "未知"),
-        ("IP 属性", data.get("ip_attribute") or "未知"),
-        ("IPPure 系数", score_display),
+        *_detail_rows(data),
     ])
 
 
 def print_node_result(data: dict):
-    label = data.get("ippure_label")
-    color = COLOR_BY_LABEL.get(label, "") if label else ""
-    score_display = data.get("ippure_raw") or "暂不可用"
-    if color:
-        score_display = colorize(score_display, color)
-
     print(colorize("Clash 节点纯净度检测结果", BOLD))
     print_kv([
         ("节点名称", data.get("node_name") or "-"),
         ("协议类型", data.get("node_type") or "-"),
         ("节点服务器", f"{data.get('node_server')}:{data.get('node_port')}"),
         ("出口 IP", data.get("egress_ip", "-")),
-        ("IP 来源", data.get("ip_source") or "未知"),
-        ("IP 属性", data.get("ip_attribute") or "未知"),
-        ("IPPure 系数", score_display),
+        *_detail_rows(data),
     ])
 
 
 def _truncate(s: str, width: int) -> str:
     return s if len(s) <= width else s[: width - 1] + "…"
+
+
+def _padded_cell(text: str, width: int, color: str = "") -> str:
+    """Truncate/pad to a fixed display width, then colorize. Colorizing
+    after padding (not before) keeps ANSI escape codes from throwing off
+    ljust's width calculation."""
+    truncated = _truncate(text, width).ljust(width)
+    return colorize(truncated, color) if color else truncated
 
 
 def print_nodes_table(data: dict):
@@ -102,6 +142,8 @@ def print_nodes_table(data: dict):
         ("IP 来源", 10),
         ("IP 属性", 10),
         ("IPPure 系数", 14),
+        ("Cloudflare 系数", 16),
+        ("WebRTC 泄露", 10),
     ]
     header = "  ".join(_truncate(name, w).ljust(w) for name, w in cols)
     print(header)
@@ -120,10 +162,22 @@ def print_nodes_table(data: dict):
         ip = _truncate(r.get("egress_ip") or "-", cols[2][1])
         source = _truncate(r.get("ip_source") or "未知", cols[3][1])
         attr = _truncate(r.get("ip_attribute") or "未知", cols[4][1])
+
         score_display = r.get("ippure_raw") or "暂不可用"
-        label = r.get("ippure_label")
-        color = COLOR_BY_LABEL.get(label, "") if label else ""
-        score_cell = colorize(_truncate(score_display, cols[5][1]), color) if color else _truncate(score_display, cols[5][1])
+        score_color = COLOR_BY_LABEL.get(r.get("ippure_label"), "") if r.get("ippure_label") else ""
+        score_cell = _padded_cell(score_display, cols[5][1], score_color)
+
+        cf_display = r.get("cloudflare_raw") or "暂不可用"
+        cf_color = COLOR_BY_LABEL.get(r.get("cloudflare_label"), "") if r.get("cloudflare_label") else ""
+        cf_cell = _padded_cell(cf_display, cols[6][1], cf_color)
+
+        leak = r.get("webrtc_leak") or {}
+        if leak.get("leaked") is True:
+            leak_cell = colorize("泄露", "\033[31m")
+        elif leak.get("leaked") is False:
+            leak_cell = colorize("未泄露", "\033[32m")
+        else:
+            leak_cell = "-"
 
         row = "  ".join([
             name.ljust(cols[0][1]),
@@ -132,6 +186,8 @@ def print_nodes_table(data: dict):
             source.ljust(cols[3][1]),
             attr.ljust(cols[4][1]),
             score_cell,
+            cf_cell,
+            leak_cell,
         ])
         print(row)
 

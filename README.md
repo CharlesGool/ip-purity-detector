@@ -54,19 +54,80 @@ docker compose up -d --build
 
 打开浏览器访问 `http://<本机IP>:8000` 即可使用。
 
-## 部署到其他电脑
+## 在一台全新的 Linux 电脑上从零部署
 
-只需要目标机器装有 Docker（含 `docker compose`），把 `/root/ipdetect` 整个目录拷贝过去，
-不需要额外安装 Python、浏览器或任何依赖——都在镜像构建时自动装好。
+假设是一台干净的服务器/虚拟机（以 Ubuntu/Debian 为例），既没装 Docker，也没有这份代码，
+从头走一遍：
+
+### 1. 装 Docker
+
+用官方安装脚本，主流发行版（Ubuntu/Debian/CentOS/Fedora 等）通用：
 
 ```bash
-# 把目录拷到目标机器后
-cd ipdetect
+curl -fsSL https://get.docker.com | sh
+sudo systemctl enable --now docker
+```
+
+验证装好了、且自带新版 `docker compose`（不是老的独立 `docker-compose` 命令）：
+
+```bash
+docker --version
+docker compose version
+```
+
+如果 `docker compose version` 报"找不到命令"，说明装的版本没带 compose 插件，参考
+[Docker 官方文档](https://docs.docker.com/compose/install/) 单独装一下。
+
+（可选）把当前用户加进 `docker` 组，之后就不用每条命令都 `sudo`：
+
+```bash
+sudo usermod -aG docker $USER
+newgrp docker   # 或者退出重新登录一次让分组生效
+```
+
+### 2. 从 GitHub 拉代码
+
+大多数发行版自带 `git`，没有的话先装一下（`sudo apt install -y git` 或对应发行版的包管理器）：
+
+```bash
+git clone https://github.com/CharlesGool/ip-purity-detector.git
+cd ip-purity-detector
+```
+
+### 3. 构建并启动
+
+```bash
 docker compose up -d --build
 ```
 
-默认对外暴露 `8000` 端口，如需换端口修改 `docker-compose.yml` 里的 `ports` 映射，例如
-`"9000:8000"`。
+首次构建会在镜像里自动装好 Chromium（Playwright）和 mihomo，不需要额外操作，看网速可能要
+几分钟。
+
+### 4. 访问
+
+浏览器打开 `http://<这台服务器的IP>:8000`。如果是云服务器，记得在安全组/防火墙（`ufw` 等）
+里放行 `8000` 端口；如果不想直接暴露这个端口，可以把 `docker-compose.yml` 里的 `ports`
+改成只绑本机（`"127.0.0.1:8000:8000"`），再自行套一层反向代理。
+
+### 5. 常用运维命令
+
+```bash
+docker compose logs -f          # 看实时日志
+docker compose ps               # 看容器状态
+docker compose down             # 停止服务（不会删代码或镜像）
+```
+
+以后更新代码：
+
+```bash
+git pull
+docker compose up -d --build    # 重新构建镜像并重启容器
+```
+
+### 换一个端口
+
+默认对外暴露 `8000` 端口，如需换端口，改 `docker-compose.yml` 里的 `ports` 映射，例如把
+`"8000:8000"` 改成 `"9000:8000"`（宿主机 9000 端口对外，容器内部仍是 8000）。
 
 ### 不用 Docker，直接跑（不推荐，但可行）
 

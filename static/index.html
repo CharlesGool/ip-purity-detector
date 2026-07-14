@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>IP 纯净度检测</title>
+<style>
+  :root {
+    --bg: #f4f6fb;
+    --card: #ffffff;
+    --text: #1b1f27;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #4f46e5;
+    --accent-soft: #eef2ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --card: #171a21;
+      --text: #e8eaed;
+      --muted: #9aa0ab;
+      --border: #2a2e37;
+      --accent: #818cf8;
+      --accent-soft: #1e1b3a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex;
+    justify-content: center;
+    padding: 48px 16px;
+  }
+  .wrap { width: 100%; max-width: 640px; }
+  h1 {
+    font-size: 1.5rem;
+    margin: 0 0 4px;
+    text-align: center;
+  }
+  .subtitle {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin: 0 0 24px;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 4px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 4px;
+    margin-bottom: 16px;
+  }
+  .tab-btn {
+    flex: 1;
+    background: transparent;
+    color: var(--muted);
+    border-radius: 8px;
+    padding: 8px 0;
+    font-size: 0.9rem;
+  }
+  .tab-btn.active {
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  .search-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 8px;
+    display: flex;
+    gap: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  input[type="text"] {
+    flex: 1;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 1rem;
+    padding: 12px 14px;
+    min-width: 0;
+  }
+  textarea {
+    width: 100%;
+    min-height: 130px;
+    resize: vertical;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    padding: 12px 14px;
+  }
+  .node-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .node-card button {
+    width: 100%;
+    margin-top: 4px;
+    padding: 10px 0;
+  }
+
+  button {
+    border: none;
+    border-radius: 12px;
+    background: var(--accent);
+    color: white;
+    font-size: 0.95rem;
+    padding: 0 22px;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  button:hover { opacity: 0.9; }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+  .hint { text-align: center; color: var(--muted); font-size: 0.8rem; margin-top: 10px; }
+
+  .result {
+    margin-top: 28px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px;
+    display: none;
+  }
+  .result.visible { display: block; }
+  .result-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.95rem;
+    gap: 12px;
+  }
+  .result-row:last-child { border-bottom: none; }
+  .result-key { color: var(--muted); flex-shrink: 0; }
+  .result-value { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: right; overflow-wrap: anywhere; }
+
+  .tag {
+    display: inline-block;
+    padding: 3px 12px;
+    border-radius: 999px;
+    color: white;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+
+  .score-bar-wrap { margin-top: 4px; }
+  .score-bar {
+    position: relative;
+    height: 8px;
+    border-radius: 999px;
+    background: linear-gradient(to right, #166534, #22c55e, #84cc16, #eab308, #f97316, #dc2626);
+    margin-top: 8px;
+  }
+  .score-dot {
+    position: absolute;
+    top: -4px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--card);
+    border: 3px solid var(--text);
+    transform: translateX(-50%);
+  }
+  .score-scale {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.7rem;
+    color: var(--muted);
+    margin-top: 6px;
+  }
+
+  .error {
+    margin-top: 16px;
+    color: #dc2626;
+    text-align: center;
+    font-size: 0.9rem;
+    display: none;
+    white-space: pre-wrap;
+  }
+  .error.visible { display: block; }
+
+  .loading {
+    margin-top: 16px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.9rem;
+    display: none;
+  }
+  .loading.visible { display: block; }
+
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.75rem;
+    margin-top: 40px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>IP 纯净度检测</h1>
+  <p class="subtitle">查看 IP / 域名 / Clash 节点出口 IP 的来源、属性与 IPPure 纯净度系数</p>
+
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="ip">IP / 域名检测</button>
+    <button class="tab-btn" data-tab="node">Clash 节点检测</button>
+  </div>
+
+  <div id="panel-ip" class="panel active">
+    <div class="search-card">
+      <input id="target" type="text" placeholder="例如 8.8.8.8 或 example.com" autocomplete="off">
+      <button id="submit-ip">检测</button>
+    </div>
+    <div class="hint">域名会先解析为出口 IP，再检测该 IP 的纯净度</div>
+  </div>
+
+  <div id="panel-node" class="panel">
+    <div class="node-card">
+      <textarea id="node-config" placeholder="粘贴单个 Clash 节点配置，例如：&#10;- { name: '🇸🇬新加坡', type: vless, server: example.com, port: 443, uuid: xxxx, ... }"></textarea>
+      <button id="submit-node">检测节点出口 IP</button>
+    </div>
+    <div class="hint">会实际用该节点连接一次外网以获取真实出口 IP，耗时略久属正常现象</div>
+  </div>
+
+  <div id="loading" class="loading">正在检测，请稍候...</div>
+  <div id="error" class="error"></div>
+
+  <div id="result" class="result">
+    <div class="result-row" id="row-input">
+      <span class="result-key">输入</span>
+      <span class="result-value" id="val-input">-</span>
+    </div>
+    <div class="result-row" id="row-node-name" style="display:none;">
+      <span class="result-key">节点名称</span>
+      <span class="result-value" id="val-node-name">-</span>
+    </div>
+    <div class="result-row" id="row-node-type" style="display:none;">
+      <span class="result-key">协议类型</span>
+      <span class="result-value" id="val-node-type">-</span>
+    </div>
+    <div class="result-row" id="row-node-server" style="display:none;">
+      <span class="result-key">节点服务器</span>
+      <span class="result-value" id="val-node-server">-</span>
+    </div>
+    <div class="result-row">
+      <span class="result-key">出口 IP</span>
+      <span class="result-value" id="val-ip">-</span>
+    </div>
+    <div class="result-row">
+      <span class="result-key">IP 来源</span>
+      <span class="result-value" id="val-source">-</span>
+    </div>
+    <div class="result-row">
+      <span class="result-key">IP 属性</span>
+      <span class="result-value" id="val-attr">-</span>
+    </div>
+    <div>
+      <div class="result-row" style="border-bottom:none; padding-bottom:0;">
+        <span class="result-key">IPPure 系数</span>
+        <span class="result-value" id="val-score">-</span>
+      </div>
+      <div class="score-bar-wrap">
+        <div class="score-bar">
+          <div class="score-dot" id="score-dot" style="left:0%"></div>
+        </div>
+        <div class="score-scale">
+          <span>0 纯净</span>
+          <span>100 风险</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>Self-hosted IP Purity Checker · 命令行工具见 cli.py</footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const loadingEl = $('loading');
+const errorEl = $('error');
+const resultEl = $('result');
+
+// --- tabs ---
+document.querySelectorAll('.tab-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach((p) => p.classList.remove('active'));
+    btn.classList.add('active');
+    $('panel-' + btn.dataset.tab).classList.add('active');
+    clearError();
+    resultEl.classList.remove('visible');
+  });
+});
+
+function setLoading(on) {
+  loadingEl.classList.toggle('visible', on);
+  document.querySelectorAll('.tabs button, .search-card button, .node-card button').forEach((b) => b.disabled = on);
+}
+
+function showError(msg) {
+  errorEl.textContent = msg;
+  errorEl.classList.add('visible');
+  resultEl.classList.remove('visible');
+}
+
+function clearError() {
+  errorEl.classList.remove('visible');
+}
+
+function tagColor(text) {
+  if (!text) return '#6b7280';
+  if (text.includes('原生') || text.includes('住宅')) return '#16a34a';
+  if (text.includes('机房') || text.includes('风险') || text.includes('黑名单')) return '#dc2626';
+  if (text.includes('IDC') || text.includes('数据中心')) return '#f97316';
+  return '#6366f1';
+}
+
+function setTag(elId, text) {
+  const tag = document.createElement('span');
+  tag.className = 'tag';
+  tag.style.background = tagColor(text);
+  tag.textContent = text || '未知';
+  $(elId).innerHTML = '';
+  $(elId).appendChild(tag);
+}
+
+function renderPurity(data) {
+  setTag('val-source', data.ip_source);
+  setTag('val-attr', data.ip_attribute);
+
+  const scoreBarWrap = document.querySelector('.score-bar-wrap');
+  if (data.ippure_score != null) {
+    $('val-score').textContent = data.ippure_raw || (data.ippure_score + '%');
+    const pct = Math.max(0, Math.min(100, data.ippure_score));
+    $('score-dot').style.left = pct + '%';
+    scoreBarWrap.style.display = '';
+  } else {
+    $('val-score').textContent = '暂不可用';
+    scoreBarWrap.style.display = 'none';
+  }
+}
+
+async function callApi(path, body) {
+  const resp = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.detail || '检测失败');
+  return data;
+}
+
+async function runIpDetect() {
+  const target = $('target').value.trim();
+  if (!target) return showError('请输入 IP 或域名');
+  clearError();
+  setLoading(true);
+  resultEl.classList.remove('visible');
+
+  try {
+    const data = await callApi('/api/detect', { target });
+
+    $('row-input').style.display = '';
+    $('row-node-name').style.display = 'none';
+    $('row-node-type').style.display = 'none';
+    $('row-node-server').style.display = 'none';
+
+    $('val-input').textContent = data.input;
+    $('val-ip').textContent = data.resolved_ip;
+    renderPurity(data);
+
+    resultEl.classList.add('visible');
+  } catch (e) {
+    showError(e.message || '检测失败，请稍后重试');
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function runNodeDetect() {
+  const config = $('node-config').value.trim();
+  if (!config) return showError('请粘贴 Clash 节点配置');
+  clearError();
+  setLoading(true);
+  resultEl.classList.remove('visible');
+
+  try {
+    const data = await callApi('/api/detect-node', { node: config });
+
+    $('row-input').style.display = 'none';
+    $('row-node-name').style.display = '';
+    $('row-node-type').style.display = '';
+    $('row-node-server').style.display = '';
+
+    $('val-node-name').textContent = data.node_name || '-';
+    $('val-node-type').textContent = data.node_type || '-';
+    $('val-node-server').textContent = `${data.node_server}:${data.node_port}`;
+    $('val-ip').textContent = data.egress_ip;
+    renderPurity(data);
+
+    resultEl.classList.add('visible');
+  } catch (e) {
+    showError(e.message || '检测失败，请稍后重试');
+  } finally {
+    setLoading(false);
+  }
+}
+
+$('submit-ip').addEventListener('click', runIpDetect);
+$('target').addEventListener('keydown', (e) => { if (e.key === 'Enter') runIpDetect(); });
+$('submit-node').addEventListener('click', runNodeDetect);
+</script>
+</body>
+</html>

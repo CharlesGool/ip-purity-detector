@@ -1,0 +1,8 @@
+services:
+  ipdetect:
+    build: .
+    image: ipdetect:latest
+    container_name: ipdetect
+    restart: unless-stopped
+    ports:
+      - "8000:8000"

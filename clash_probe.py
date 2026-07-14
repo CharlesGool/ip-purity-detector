@@ -27,7 +27,7 @@ MIHOMO_BIN = (
 
 STARTUP_TIMEOUT = 8.0
 PROBE_TIMEOUT = 12.0
-MAX_BATCH_NODES = 20
+MAX_BATCH_NODES = 1000
 
 IP_ECHO_URLS = [
     "https://api.ipify.org",

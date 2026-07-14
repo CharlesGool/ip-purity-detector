@@ -37,7 +37,6 @@
     padding: 48px 16px;
   }
   .wrap { width: 100%; max-width: 640px; }
-  .wrap.wide { max-width: 880px; }
   h1 {
     font-size: 1.5rem;
     margin: 0 0 4px;
@@ -205,30 +204,23 @@
     color: var(--muted);
     margin-bottom: 14px;
   }
-  .table-scroll { overflow-x: auto; }
-  .nodes-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85rem;
-    white-space: nowrap;
+  .batch-item {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 4px 20px;
+    margin-bottom: 16px;
   }
-  .nodes-table th {
-    text-align: left;
-    color: var(--muted);
-    font-weight: 600;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--border);
+  .batch-item:last-child { margin-bottom: 0; }
+  .batch-item-title {
+    font-weight: 700;
+    font-size: 1rem;
+    padding: 14px 0 2px;
   }
-  .nodes-table td {
-    padding: 10px;
-    border-bottom: 1px solid var(--border);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  }
-  .nodes-table tr:last-child td { border-bottom: none; }
-  .nodes-table td.error-cell {
+  .batch-item-error {
     color: #dc2626;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
-    white-space: normal;
+    font-size: 0.9rem;
+    padding: 8px 0 16px;
+    white-space: pre-wrap;
   }
 
   footer {
@@ -352,43 +344,12 @@
 
   <div id="nodes-table-wrap" class="nodes-table-wrap">
     <div class="nodes-summary" id="nodes-summary"></div>
-    <div class="table-scroll">
-      <table class="nodes-table">
-        <thead>
-          <tr>
-            <th>节点名称</th>
-            <th>协议</th>
-            <th>出口 IP</th>
-            <th>IP 来源</th>
-            <th>IP 属性</th>
-            <th>IPPure 系数</th>
-            <th>Cloudflare 系数</th>
-            <th>WebRTC 泄露</th>
-          </tr>
-        </thead>
-        <tbody id="nodes-table-body"></tbody>
-      </table>
-    </div>
+    <div id="nodes-list"></div>
   </div>
 
   <div id="targets-table-wrap" class="nodes-table-wrap">
     <div class="nodes-summary" id="targets-summary"></div>
-    <div class="table-scroll">
-      <table class="nodes-table">
-        <thead>
-          <tr>
-            <th>输入</th>
-            <th>出口 IP</th>
-            <th>IP 来源</th>
-            <th>IP 属性</th>
-            <th>IPPure 系数</th>
-            <th>Cloudflare 系数</th>
-            <th>WebRTC 泄露</th>
-          </tr>
-        </thead>
-        <tbody id="targets-table-body"></tbody>
-      </table>
-    </div>
+    <div id="targets-list"></div>
   </div>
 
   <footer>Self-hosted IP Purity Checker · 命令行工具见 cli.py</footer>
@@ -401,13 +362,11 @@ const errorEl = $('error');
 const resultEl = $('result');
 const nodesTableEl = $('nodes-table-wrap');
 const targetsTableEl = $('targets-table-wrap');
-const wrapEl = $('wrap');
 
 function hideAllResults() {
   resultEl.classList.remove('visible');
   nodesTableEl.classList.remove('visible');
   targetsTableEl.classList.remove('visible');
-  wrapEl.classList.remove('wide');
 }
 
 // --- tabs ---
@@ -531,52 +490,93 @@ async function callApi(path, body) {
   return data;
 }
 
+// --- shared HTML builders for full-detail batch items (same fields as
+// the single-result card, just stamped out per result instead of bound
+// to fixed element IDs) ---
+
+function resultRowHTML(key, valueHtml) {
+  return `<div class="result-row"><span class="result-key">${escapeHtml(key)}</span><span class="result-value">${valueHtml}</span></div>`;
+}
+
+function tagHTML(text) {
+  return `<span class="tag" style="background:${tagColor(text)}">${escapeHtml(text || '未知')}</span>`;
+}
+
+function scoreBarHTML(label, score, raw) {
+  if (score == null) {
+    return resultRowHTML(label, escapeHtml(raw || '暂不可用'));
+  }
+  const pct = Math.max(0, Math.min(100, score));
+  return `
+    <div>
+      <div class="result-row" style="border-bottom:none; padding-bottom:0;">
+        <span class="result-key">${escapeHtml(label)}</span>
+        <span class="result-value">${escapeHtml(raw || (score + '%'))}</span>
+      </div>
+      <div class="score-bar-wrap">
+        <div class="score-bar"><div class="score-dot" style="left:${pct}%"></div></div>
+        <div class="score-scale"><span>0 纯净</span><span>100 风险</span></div>
+      </div>
+    </div>
+  `;
+}
+
+function webrtcLeakHTML(leak) {
+  leak = leak || {};
+  if (leak.leaked === true) {
+    return `<span style="color:#dc2626;">泄露 -> ${escapeHtml(leak.ip || '?')}${leak.location ? ' (' + escapeHtml(leak.location) + ')' : ''}</span>`;
+  }
+  if (leak.leaked === false) {
+    return `<span style="color:#16a34a;">未检测到泄露</span>`;
+  }
+  return `<span>${escapeHtml(leak.error || '未检测')}</span>`;
+}
+
+function detailRowsHTML(data) {
+  let html = '';
+  if (data.asn) html += resultRowHTML('ASN', escapeHtml(data.asn));
+  if (data.as_domain) html += resultRowHTML('AS域名', escapeHtml(data.as_domain));
+  if (data.ip_range) html += resultRowHTML('IP范围', escapeHtml(data.ip_range));
+  if (data.human_pct != null || data.bot_pct != null) {
+    html += resultRowHTML('人机流量比', `human ${data.human_pct ?? '?'}% / bot ${data.bot_pct ?? '?'}%`);
+  }
+  for (const [source, loc] of Object.entries(data.locations || {})) {
+    html += resultRowHTML(`位置 (${source})`, escapeHtml(loc));
+  }
+  html += resultRowHTML('IP 来源', tagHTML(data.ip_source));
+  html += resultRowHTML('IP 属性', tagHTML(data.ip_attribute));
+  html += scoreBarHTML('IPPure 系数', data.ippure_score, data.ippure_raw);
+  html += scoreBarHTML('Cloudflare 系数', data.cloudflare_score, data.cloudflare_raw);
+  html += resultRowHTML('WebRTC 泄露', webrtcLeakHTML(data.webrtc_leak));
+  return html;
+}
+
 function renderTargetsTable(data) {
   $('targets-summary').textContent = `共 ${data.total} 个目标，成功 ${data.success_count} 个`;
-  const tbody = $('targets-table-body');
-  tbody.innerHTML = '';
+  const list = $('targets-list');
+  list.innerHTML = '';
 
   for (const r of data.results) {
-    const tr = document.createElement('tr');
+    const item = document.createElement('div');
+    item.className = 'batch-item';
 
     if (!r.success) {
-      tr.innerHTML = `
-        <td>${escapeHtml(r.input || '-')}</td>
-        <td colspan="5" class="error-cell">失败: ${escapeHtml(r.error || '未知错误')}</td>
+      item.innerHTML = `
+        <div class="batch-item-title">${escapeHtml(r.input || '-')}</div>
+        <div class="batch-item-error">失败: ${escapeHtml(r.error || '未知错误')}</div>
       `;
-      tbody.appendChild(tr);
+      list.appendChild(item);
       continue;
     }
 
-    const scoreText = r.ippure_raw || '暂不可用';
-    const scoreColor = r.ippure_score != null ? scoreGradientColor(r.ippure_score) : 'var(--muted)';
-    const cfText = r.cloudflare_raw || '暂不可用';
-    const cfColor = r.cloudflare_score != null ? scoreGradientColor(r.cloudflare_score) : 'var(--muted)';
-
-    const leak = r.webrtc_leak || {};
-    let leakText = '未检测';
-    let leakColor = 'var(--muted)';
-    if (leak.leaked === true) {
-      leakText = '泄露';
-      leakColor = '#dc2626';
-    } else if (leak.leaked === false) {
-      leakText = '未泄露';
-      leakColor = '#16a34a';
-    }
-
-    tr.innerHTML = `
-      <td>${escapeHtml(r.input || '-')}</td>
-      <td>${escapeHtml(r.resolved_ip || '-')}</td>
-      <td><span class="tag" style="background:${tagColor(r.ip_source)}">${escapeHtml(r.ip_source || '未知')}</span></td>
-      <td><span class="tag" style="background:${tagColor(r.ip_attribute)}">${escapeHtml(r.ip_attribute || '未知')}</span></td>
-      <td style="color:${scoreColor}; font-weight:600;">${escapeHtml(scoreText)}</td>
-      <td style="color:${cfColor}; font-weight:600;">${escapeHtml(cfText)}</td>
-      <td style="color:${leakColor}; font-weight:600;">${escapeHtml(leakText)}</td>
+    item.innerHTML = `
+      <div class="batch-item-title">${escapeHtml(r.input || '-')}</div>
+      ${resultRowHTML('出口 IP', escapeHtml(r.resolved_ip || '-'))}
+      ${detailRowsHTML(r)}
     `;
-    tbody.appendChild(tr);
+    list.appendChild(item);
   }
 
-  wrapEl.classList.add('wide');
   targetsTableEl.classList.add('visible');
 }
 
@@ -616,52 +616,32 @@ async function runIpDetect() {
 
 function renderNodesTable(data) {
   $('nodes-summary').textContent = `共 ${data.total} 个节点，成功 ${data.success_count} 个`;
-  const tbody = $('nodes-table-body');
-  tbody.innerHTML = '';
+  const list = $('nodes-list');
+  list.innerHTML = '';
 
   for (const r of data.results) {
-    const tr = document.createElement('tr');
+    const item = document.createElement('div');
+    item.className = 'batch-item';
 
     if (!r.success) {
-      tr.innerHTML = `
-        <td>${escapeHtml(r.node_name || '-')}</td>
-        <td>${escapeHtml(r.node_type || '-')}</td>
-        <td colspan="6" class="error-cell">失败: ${escapeHtml(r.error || '未知错误')}</td>
+      item.innerHTML = `
+        <div class="batch-item-title">${escapeHtml(r.node_name || '-')}${r.node_type ? ' (' + escapeHtml(r.node_type) + ')' : ''}</div>
+        <div class="batch-item-error">失败: ${escapeHtml(r.error || '未知错误')}</div>
       `;
-      tbody.appendChild(tr);
+      list.appendChild(item);
       continue;
     }
 
-    const scoreText = r.ippure_raw || '暂不可用';
-    const scoreColor = r.ippure_score != null ? scoreGradientColor(r.ippure_score) : 'var(--muted)';
-    const cfText = r.cloudflare_raw || '暂不可用';
-    const cfColor = r.cloudflare_score != null ? scoreGradientColor(r.cloudflare_score) : 'var(--muted)';
-
-    const leak = r.webrtc_leak || {};
-    let leakText = '未检测';
-    let leakColor = 'var(--muted)';
-    if (leak.leaked === true) {
-      leakText = '泄露';
-      leakColor = '#dc2626';
-    } else if (leak.leaked === false) {
-      leakText = '未泄露';
-      leakColor = '#16a34a';
-    }
-
-    tr.innerHTML = `
-      <td>${escapeHtml(r.node_name || '-')}</td>
-      <td>${escapeHtml(r.node_type || '-')}</td>
-      <td>${escapeHtml(r.egress_ip || '-')}</td>
-      <td><span class="tag" style="background:${tagColor(r.ip_source)}">${escapeHtml(r.ip_source || '未知')}</span></td>
-      <td><span class="tag" style="background:${tagColor(r.ip_attribute)}">${escapeHtml(r.ip_attribute || '未知')}</span></td>
-      <td style="color:${scoreColor}; font-weight:600;">${escapeHtml(scoreText)}</td>
-      <td style="color:${cfColor}; font-weight:600;">${escapeHtml(cfText)}</td>
-      <td style="color:${leakColor}; font-weight:600;">${escapeHtml(leakText)}</td>
+    item.innerHTML = `
+      <div class="batch-item-title">${escapeHtml(r.node_name || '-')}</div>
+      ${resultRowHTML('协议类型', escapeHtml(r.node_type || '-'))}
+      ${resultRowHTML('节点服务器', escapeHtml(`${r.node_server}:${r.node_port}`))}
+      ${resultRowHTML('出口 IP', escapeHtml(r.egress_ip || '-'))}
+      ${detailRowsHTML(r)}
     `;
-    tbody.appendChild(tr);
+    list.appendChild(item);
   }
 
-  wrapEl.classList.add('wide');
   nodesTableEl.classList.add('visible');
 }
 
@@ -669,15 +649,6 @@ function escapeHtml(s) {
   const div = document.createElement('div');
   div.textContent = s;
   return div.innerHTML;
-}
-
-function scoreGradientColor(score) {
-  if (score <= 15) return '#166534';
-  if (score <= 25) return '#22c55e';
-  if (score <= 40) return '#84cc16';
-  if (score <= 50) return '#eab308';
-  if (score <= 70) return '#f97316';
-  return '#dc2626';
 }
 
 async function runNodeDetect() {

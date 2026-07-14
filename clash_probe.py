@@ -40,6 +40,91 @@ class NodeProbeError(Exception):
     pass
 
 
+def _is_node(obj: Any) -> bool:
+    return isinstance(obj, dict) and "server" in obj and "type" in obj
+
+
+def _parse_structured(raw: str) -> list:
+    """Try parsing `raw` as well-formed YAML and pull node dicts out of it."""
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError:
+        return []
+
+    candidates: list = []
+    if isinstance(data, dict):
+        if isinstance(data.get("proxies"), list) and data["proxies"]:
+            candidates = data["proxies"]
+        elif _is_node(data):
+            candidates = [data]
+    elif isinstance(data, list):
+        candidates = data
+
+    return [n for n in candidates if _is_node(n)]
+
+
+def _extract_flow_blobs(raw: str) -> list:
+    """Pull out every balanced top-level `{ ... }` chunk in `raw`, ignoring
+    braces inside quoted strings.
+
+    Users often paste node lists assembled from several different sources
+    (converters, subscription tools, hand-edited snippets), each using its
+    own indentation/quoting conventions. That breaks YAML's block-sequence
+    parser (which is strict about indentation) even though every individual
+    `- { ... }` entry is itself perfectly valid flow-style YAML. Scanning
+    for balanced braces sidesteps indentation entirely and tolerates that
+    kind of copy-paste mess, including entries whose flow mapping happens
+    to be wrapped across multiple lines.
+    """
+    blobs = []
+    depth = 0
+    start = None
+    quote = None
+    i, n = 0, len(raw)
+    while i < n:
+        c = raw[i]
+        if quote:
+            if quote == '"' and c == "\\":
+                i += 2
+                continue
+            if quote == "'" and c == "'" and i + 1 < n and raw[i + 1] == "'":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+
+        if c in ("'", '"'):
+            quote = c
+        elif c == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    blobs.append(raw[start : i + 1])
+                    start = None
+        i += 1
+    return blobs
+
+
+def _parse_flow_fallback(raw: str) -> list:
+    """Recover nodes from non-standard/invalid YAML by extracting individual
+    flow-style `{ ... }` mappings and parsing each on its own."""
+    nodes = []
+    for blob in _extract_flow_blobs(raw):
+        try:
+            obj = yaml.safe_load(blob)
+        except yaml.YAMLError:
+            continue
+        if _is_node(obj):
+            nodes.append(obj)
+    return nodes
+
+
 def parse_nodes(raw: str) -> list:
     """Parse one or many Clash proxy nodes out of pasted YAML.
 
@@ -47,26 +132,20 @@ def parse_nodes(raw: str) -> list:
     multi-line list of nodes, or a full config containing a `proxies:`
     list. Returns every well-formed node found (i.e. dicts with both
     `type` and `server`), skipping anything else in the list silently.
+
+    Also tolerant of non-standard input that isn't strictly valid YAML
+    (e.g. pasted-together node lines with inconsistent indentation) as
+    long as each node is still a recognizable flow-style `{ ... }` mapping
+    — see `_parse_flow_fallback`.
     """
     raw = (raw or "").strip()
     if not raw:
         raise NodeProbeError("请输入 Clash 节点配置")
 
-    try:
-        data = yaml.safe_load(raw)
-    except yaml.YAMLError as e:
-        raise NodeProbeError(f"节点配置不是合法的 YAML: {e}")
+    nodes = _parse_structured(raw)
+    if not nodes:
+        nodes = _parse_flow_fallback(raw)
 
-    candidates: list = []
-    if isinstance(data, dict):
-        if isinstance(data.get("proxies"), list) and data["proxies"]:
-            candidates = data["proxies"]
-        elif "server" in data and "type" in data:
-            candidates = [data]
-    elif isinstance(data, list):
-        candidates = data
-
-    nodes = [n for n in candidates if isinstance(n, dict) and "server" in n and "type" in n]
     if not nodes:
         raise NodeProbeError(
             "无法从输入中解析出有效的 Clash 节点（需要包含 type / server 等字段）"

@@ -8,6 +8,8 @@ its own for every invocation.
 Examples:
     ./cli.py ip 8.8.8.8
     ./cli.py ip example.com --json
+    ./cli.py ip "8.8.8.8, example.com"               # batch, comma-separated
+    ./cli.py ip -f targets.txt                       # batch, one per line
     ./cli.py node -f node.yaml                      # single or many nodes
     cat nodes.yaml | ./cli.py node                   # batch, piped in
     ./cli.py node "- { name: 'sg', type: vless, server: 1.2.3.4, port: 443, ... }"
@@ -15,6 +17,7 @@ Examples:
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -192,6 +195,65 @@ def print_nodes_table(data: dict):
         print(row)
 
 
+def print_targets_table(data: dict):
+    results = data["results"]
+    print(colorize(f"IP / 域名批量检测结果  ({data['success_count']}/{data['total']} 成功)", BOLD))
+    print()
+
+    cols = [
+        ("输入", 24),
+        ("出口 IP", 16),
+        ("IP 来源", 10),
+        ("IP 属性", 10),
+        ("IPPure 系数", 14),
+        ("Cloudflare 系数", 16),
+        ("WebRTC 泄露", 10),
+    ]
+    header = "  ".join(_truncate(name, w).ljust(w) for name, w in cols)
+    print(header)
+    print("-" * len(header))
+
+    for r in results:
+        name = _truncate(r.get("input") or "-", cols[0][1])
+        if not r.get("success"):
+            row = f"{name.ljust(cols[0][1])}  " + colorize(
+                _truncate("失败: " + (r.get("error") or "未知错误"), 70), "\033[31m"
+            )
+            print(row)
+            continue
+
+        ip = _truncate(r.get("resolved_ip") or "-", cols[1][1])
+        source = _truncate(r.get("ip_source") or "未知", cols[2][1])
+        attr = _truncate(r.get("ip_attribute") or "未知", cols[3][1])
+
+        score_display = r.get("ippure_raw") or "暂不可用"
+        score_color = COLOR_BY_LABEL.get(r.get("ippure_label"), "") if r.get("ippure_label") else ""
+        score_cell = _padded_cell(score_display, cols[4][1], score_color)
+
+        cf_display = r.get("cloudflare_raw") or "暂不可用"
+        cf_color = COLOR_BY_LABEL.get(r.get("cloudflare_label"), "") if r.get("cloudflare_label") else ""
+        cf_cell = _padded_cell(cf_display, cols[5][1], cf_color)
+
+        leak = r.get("webrtc_leak") or {}
+        if leak.get("leaked") is True:
+            leak_cell = colorize("泄露", "\033[31m")
+        elif leak.get("leaked") is False:
+            leak_cell = colorize("未泄露", "\033[32m")
+        else:
+            leak_cell = "-"
+
+        row = "  ".join([
+            name.ljust(cols[0][1]),
+            ip.ljust(cols[1][1]),
+            source.ljust(cols[2][1]),
+            attr.ljust(cols[3][1]),
+            score_cell,
+            cf_cell,
+            leak_cell,
+        ])
+        print(row)
+
+
 def request(url: str, path: str, payload: dict, timeout: float) -> dict:
     try:
         resp = requests.post(f"{url.rstrip('/')}{path}", json=payload, timeout=timeout)
@@ -220,11 +282,36 @@ def request(url: str, path: str, payload: dict, timeout: float) -> dict:
 
 
 def cmd_ip(args):
-    data = request(args.url, "/api/detect", {"target": args.target}, timeout=args.timeout)
-    if args.json:
-        print(json.dumps(data, ensure_ascii=False, indent=2))
+    if args.file:
+        text = Path(args.file).read_text(encoding="utf-8")
+    elif args.target:
+        text = args.target
+    elif not sys.stdin.isatty():
+        text = sys.stdin.read()
     else:
-        print_ip_result(data)
+        print(
+            "错误: 需要提供 IP/域名（位置参数 / -f 文件 / 标准输入管道三选一）",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    targets = [t.strip() for t in re.split(r"[\n,，]+", text) if t.strip()]
+    if not targets:
+        print("错误: 未解析出任何 IP/域名", file=sys.stderr)
+        sys.exit(1)
+
+    if len(targets) == 1:
+        data = request(args.url, "/api/detect", {"target": targets[0]}, timeout=args.timeout)
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            print_ip_result(data)
+    else:
+        data = request(args.url, "/api/detect-batch", {"targets": text}, timeout=args.timeout)
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            print_targets_table(data)
 
 
 def cmd_node(args):
@@ -270,8 +357,9 @@ def main():
 
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    ip_p = sub.add_parser("ip", help="检测 IP 或域名的纯净度", parents=[common])
-    ip_p.add_argument("target", help="IP 地址或域名")
+    ip_p = sub.add_parser("ip", help="检测 IP 或域名的纯净度（支持逗号/换行分隔的多个目标）", parents=[common])
+    ip_p.add_argument("target", nargs="?", help="IP 地址或域名，多个用逗号或换行分隔")
+    ip_p.add_argument("-f", "--file", help="从文件读取 IP/域名列表")
     ip_p.set_defaults(func=cmd_ip)
 
     node_p = sub.add_parser("node", help="检测 Clash 节点出口 IP 的纯净度", parents=[common])

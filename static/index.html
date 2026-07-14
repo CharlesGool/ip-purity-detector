@@ -75,25 +75,6 @@
   .panel { display: none; }
   .panel.active { display: block; }
 
-  .search-card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 8px;
-    display: flex;
-    gap: 8px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
-  }
-  input[type="text"] {
-    flex: 1;
-    border: none;
-    outline: none;
-    background: transparent;
-    color: var(--text);
-    font-size: 1rem;
-    padding: 12px 14px;
-    min-width: 0;
-  }
   textarea {
     width: 100%;
     min-height: 130px;
@@ -269,11 +250,11 @@
   </div>
 
   <div id="panel-ip" class="panel active">
-    <div class="search-card">
-      <input id="target" type="text" placeholder="例如 8.8.8.8 或 example.com" autocomplete="off">
+    <div class="node-card">
+      <textarea id="target" style="min-height:56px;" placeholder="例如 8.8.8.8 或 example.com&#10;支持一次输入多个，一行一个或用逗号分隔：&#10;8.8.8.8&#10;example.com, 1.1.1.1"></textarea>
       <button id="submit-ip">检测</button>
     </div>
-    <div class="hint">域名会先解析为出口 IP，再检测该 IP 的纯净度</div>
+    <div class="hint">域名会先解析为出口 IP 再检测纯净度；支持一次输入多个目标，一行一个或逗号分隔（最多 1000 个），按 Ctrl/Cmd+Enter 快速提交</div>
   </div>
 
   <div id="panel-node" class="panel">
@@ -390,6 +371,26 @@
     </div>
   </div>
 
+  <div id="targets-table-wrap" class="nodes-table-wrap">
+    <div class="nodes-summary" id="targets-summary"></div>
+    <div class="table-scroll">
+      <table class="nodes-table">
+        <thead>
+          <tr>
+            <th>输入</th>
+            <th>出口 IP</th>
+            <th>IP 来源</th>
+            <th>IP 属性</th>
+            <th>IPPure 系数</th>
+            <th>Cloudflare 系数</th>
+            <th>WebRTC 泄露</th>
+          </tr>
+        </thead>
+        <tbody id="targets-table-body"></tbody>
+      </table>
+    </div>
+  </div>
+
   <footer>Self-hosted IP Purity Checker · 命令行工具见 cli.py</footer>
 </div>
 
@@ -399,11 +400,13 @@ const loadingEl = $('loading');
 const errorEl = $('error');
 const resultEl = $('result');
 const nodesTableEl = $('nodes-table-wrap');
+const targetsTableEl = $('targets-table-wrap');
 const wrapEl = $('wrap');
 
 function hideAllResults() {
   resultEl.classList.remove('visible');
   nodesTableEl.classList.remove('visible');
+  targetsTableEl.classList.remove('visible');
   wrapEl.classList.remove('wide');
 }
 
@@ -421,7 +424,7 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
 
 function setLoading(on) {
   loadingEl.classList.toggle('visible', on);
-  document.querySelectorAll('.tabs button, .search-card button, .node-card button').forEach((b) => b.disabled = on);
+  document.querySelectorAll('.tabs button, .node-card button').forEach((b) => b.disabled = on);
 }
 
 function showError(msg) {
@@ -528,26 +531,82 @@ async function callApi(path, body) {
   return data;
 }
 
+function renderTargetsTable(data) {
+  $('targets-summary').textContent = `共 ${data.total} 个目标，成功 ${data.success_count} 个`;
+  const tbody = $('targets-table-body');
+  tbody.innerHTML = '';
+
+  for (const r of data.results) {
+    const tr = document.createElement('tr');
+
+    if (!r.success) {
+      tr.innerHTML = `
+        <td>${escapeHtml(r.input || '-')}</td>
+        <td colspan="5" class="error-cell">失败: ${escapeHtml(r.error || '未知错误')}</td>
+      `;
+      tbody.appendChild(tr);
+      continue;
+    }
+
+    const scoreText = r.ippure_raw || '暂不可用';
+    const scoreColor = r.ippure_score != null ? scoreGradientColor(r.ippure_score) : 'var(--muted)';
+    const cfText = r.cloudflare_raw || '暂不可用';
+    const cfColor = r.cloudflare_score != null ? scoreGradientColor(r.cloudflare_score) : 'var(--muted)';
+
+    const leak = r.webrtc_leak || {};
+    let leakText = '未检测';
+    let leakColor = 'var(--muted)';
+    if (leak.leaked === true) {
+      leakText = '泄露';
+      leakColor = '#dc2626';
+    } else if (leak.leaked === false) {
+      leakText = '未泄露';
+      leakColor = '#16a34a';
+    }
+
+    tr.innerHTML = `
+      <td>${escapeHtml(r.input || '-')}</td>
+      <td>${escapeHtml(r.resolved_ip || '-')}</td>
+      <td><span class="tag" style="background:${tagColor(r.ip_source)}">${escapeHtml(r.ip_source || '未知')}</span></td>
+      <td><span class="tag" style="background:${tagColor(r.ip_attribute)}">${escapeHtml(r.ip_attribute || '未知')}</span></td>
+      <td style="color:${scoreColor}; font-weight:600;">${escapeHtml(scoreText)}</td>
+      <td style="color:${cfColor}; font-weight:600;">${escapeHtml(cfText)}</td>
+      <td style="color:${leakColor}; font-weight:600;">${escapeHtml(leakText)}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+
+  wrapEl.classList.add('wide');
+  targetsTableEl.classList.add('visible');
+}
+
 async function runIpDetect() {
-  const target = $('target').value.trim();
-  if (!target) return showError('请输入 IP 或域名');
+  const raw = $('target').value.trim();
+  if (!raw) return showError('请输入 IP 或域名');
   clearError();
   setLoading(true);
   hideAllResults();
 
+  const targets = raw.split(/[\n,，]+/).map((s) => s.trim()).filter(Boolean);
+
   try {
-    const data = await callApi('/api/detect', { target });
+    if (targets.length <= 1) {
+      const data = await callApi('/api/detect', { target: targets[0] || raw });
 
-    $('row-input').style.display = '';
-    $('row-node-name').style.display = 'none';
-    $('row-node-type').style.display = 'none';
-    $('row-node-server').style.display = 'none';
+      $('row-input').style.display = '';
+      $('row-node-name').style.display = 'none';
+      $('row-node-type').style.display = 'none';
+      $('row-node-server').style.display = 'none';
 
-    $('val-input').textContent = data.input;
-    $('val-ip').textContent = data.resolved_ip;
-    renderPurity(data);
+      $('val-input').textContent = data.input;
+      $('val-ip').textContent = data.resolved_ip;
+      renderPurity(data);
 
-    resultEl.classList.add('visible');
+      resultEl.classList.add('visible');
+    } else {
+      const data = await callApi('/api/detect-batch', { targets: raw });
+      renderTargetsTable(data);
+    }
   } catch (e) {
     showError(e.message || '检测失败，请稍后重试');
   } finally {
@@ -658,7 +717,7 @@ async function runNodeDetect() {
 }
 
 $('submit-ip').addEventListener('click', runIpDetect);
-$('target').addEventListener('keydown', (e) => { if (e.key === 'Enter') runIpDetect(); });
+$('target').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) runIpDetect(); });
 $('submit-node').addEventListener('click', runNodeDetect);
 </script>
 </body>

@@ -20,6 +20,7 @@ SELECTOR_TIMEOUT_MS = 15000
 MAX_CONCURRENCY = 3
 MAX_RETRIES = 2
 MAX_NODE_CONCURRENCY = 2
+MAX_BATCH_TARGETS = 1000
 WEBRTC_CHECK_TIMEOUT_MS = 15000
 
 # Resource types that only slow down the page without affecting the
@@ -173,6 +174,10 @@ class DetectRequest(BaseModel):
     target: str
 
 
+class DetectBatchRequest(BaseModel):
+    targets: str
+
+
 class NodeDetectRequest(BaseModel):
     node: str
 
@@ -203,6 +208,16 @@ def resolve_to_ip(target: str) -> str:
             if info[0] == family_pref:
                 return info[4][0]
     return infos[0][4][0]
+
+
+def parse_targets(raw: str) -> list:
+    """Split pasted IP/domain text into individual targets. Accepts one per
+    line, comma-separated (half- or full-width), or a mix of both."""
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    parts = re.split(r"[\n,，]+", raw)
+    return [p.strip() for p in parts if p.strip()]
 
 
 async def _block_heavy_resources(route):
@@ -377,6 +392,47 @@ async def detect(req: DetectRequest):
         # this context), not the queried IP itself — see check_node_webrtc_leak
         # for the version that actually matters, tunneled through a node.
         "webrtc_leak": data.get("webrtcLeak"),
+    }
+
+
+async def _detect_single_target(target: str) -> dict:
+    base = {"input": target}
+    try:
+        ip = resolve_to_ip(target)
+    except HTTPException as e:
+        return {**base, "success": False, "error": str(e.detail)}
+
+    base["resolved_ip"] = ip
+
+    try:
+        data = await get_purity_with_retry(ip)
+    except HTTPException as e:
+        return {**base, "success": False, "error": str(e.detail)}
+
+    return {
+        **base,
+        "success": True,
+        **build_detail_fields(data),
+        "webrtc_leak": data.get("webrtcLeak"),
+    }
+
+
+@app.post("/api/detect-batch")
+async def detect_batch(req: DetectBatchRequest):
+    targets = parse_targets(req.targets)
+    if not targets:
+        raise HTTPException(status_code=400, detail="请输入至少一个 IP 或域名（支持换行或逗号分隔）")
+    if len(targets) > MAX_BATCH_TARGETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"一次最多支持检测 {MAX_BATCH_TARGETS} 个（本次输入了 {len(targets)} 个）",
+        )
+
+    results = await asyncio.gather(*(_detect_single_target(t) for t in targets))
+    return {
+        "total": len(results),
+        "success_count": sum(1 for r in results if r.get("success")),
+        "results": results,
     }
 
 

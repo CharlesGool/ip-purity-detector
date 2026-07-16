@@ -190,6 +190,31 @@
   }
   .loading.visible { display: block; }
 
+  .progress-wrap {
+    margin-top: 16px;
+    display: none;
+  }
+  .progress-wrap.visible { display: block; }
+  .progress-text {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin-bottom: 6px;
+  }
+  .progress-track {
+    height: 8px;
+    border-radius: 999px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    border-radius: 999px;
+    transition: width 0.2s ease;
+  }
+
   .nodes-table-wrap {
     margin-top: 28px;
     background: var(--card);
@@ -258,6 +283,10 @@
   </div>
 
   <div id="loading" class="loading">正在检测，请稍候...</div>
+  <div id="progress-wrap" class="progress-wrap">
+    <div class="progress-text" id="progress-text">0 / 0</div>
+    <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+  </div>
   <div id="error" class="error"></div>
 
   <div id="result" class="result">
@@ -362,11 +391,58 @@ const errorEl = $('error');
 const resultEl = $('result');
 const nodesTableEl = $('nodes-table-wrap');
 const targetsTableEl = $('targets-table-wrap');
+const progressWrapEl = $('progress-wrap');
 
 function hideAllResults() {
   resultEl.classList.remove('visible');
   nodesTableEl.classList.remove('visible');
   targetsTableEl.classList.remove('visible');
+}
+
+function setProgress(done, total) {
+  if (!total) { progressWrapEl.classList.remove('visible'); return; }
+  progressWrapEl.classList.add('visible');
+  const pct = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+  $('progress-fill').style.width = pct + '%';
+  $('progress-text').textContent = `正在检测 ${done} / ${total}`;
+}
+
+function hideProgress() {
+  progressWrapEl.classList.remove('visible');
+}
+
+// Streams an NDJSON (newline-delimited JSON) response body, invoking
+// onEvent(obj) for each parsed line as it arrives, so callers can update a
+// progress bar while a batch request is still in flight instead of only
+// finding out once the whole thing finishes.
+async function streamNdjson(path, body, onEvent) {
+  const resp = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    let detail = '检测失败';
+    try { detail = (await resp.json()).detail || detail; } catch (e) { /* non-JSON error body */ }
+    throw new Error(detail);
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (line) onEvent(JSON.parse(line));
+    }
+  }
+  const tail = buf.trim();
+  if (tail) onEvent(JSON.parse(tail));
 }
 
 // --- tabs ---
@@ -604,13 +680,19 @@ async function runIpDetect() {
 
       resultEl.classList.add('visible');
     } else {
-      const data = await callApi('/api/detect-batch', { targets: raw });
-      renderTargetsTable(data);
+      setProgress(0, targets.length);
+      let finalData = null;
+      await streamNdjson('/api/detect-batch-stream', { targets: raw }, (evt) => {
+        if (evt.type === 'progress') setProgress(evt.done, evt.total);
+        else if (evt.type === 'done') finalData = evt;
+      });
+      if (finalData) renderTargetsTable(finalData);
     }
   } catch (e) {
     showError(e.message || '检测失败，请稍后重试');
   } finally {
     setLoading(false);
+    hideProgress();
   }
 }
 
@@ -659,7 +741,13 @@ async function runNodeDetect() {
   hideAllResults();
 
   try {
-    const data = await callApi('/api/detect-nodes', { nodes: config });
+    let finalData = null;
+    await streamNdjson('/api/detect-nodes-stream', { nodes: config }, (evt) => {
+      if (evt.type === 'progress') setProgress(evt.done, evt.total);
+      else if (evt.type === 'done') finalData = evt;
+    });
+    if (!finalData) throw new Error('检测失败');
+    const data = finalData;
 
     if (data.total === 1) {
       const r = data.results[0];
@@ -684,6 +772,7 @@ async function runNodeDetect() {
     showError(e.message || '检测失败，请稍后重试');
   } finally {
     setLoading(false);
+    hideProgress();
   }
 }
 

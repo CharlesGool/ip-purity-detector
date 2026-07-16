@@ -1,5 +1,6 @@
 import asyncio
 import ipaddress
+import json
 import re
 import socket
 from contextlib import asynccontextmanager
@@ -7,6 +8,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from playwright.async_api import async_playwright, Browser, Playwright
@@ -429,11 +431,57 @@ async def detect_batch(req: DetectBatchRequest):
         )
 
     results = await asyncio.gather(*(_detect_single_target(t) for t in targets))
+    return _batch_summary(results)
+
+
+def _batch_summary(results: list) -> dict:
     return {
         "total": len(results),
         "success_count": sum(1 for r in results if r.get("success")),
         "results": results,
     }
+
+
+async def _stream_progress(coros: list):
+    """Run coroutines concurrently and yield one NDJSON line as each
+    completes, in original input order (via its index), followed by a
+    final `done` line carrying the same {total, success_count, results}
+    shape as the non-streaming batch endpoints. Lets slow batches (many
+    nodes/targets) report progress instead of going silent until the very
+    end."""
+    total = len(coros)
+    results: list = [None] * total
+
+    async def _run(i: int, coro):
+        return i, await coro
+
+    tasks = [asyncio.create_task(_run(i, c)) for i, c in enumerate(coros)]
+    done = 0
+    for fut in asyncio.as_completed(tasks):
+        i, r = await fut
+        results[i] = r
+        done += 1
+        yield json.dumps(
+            {"type": "progress", "done": done, "total": total, "index": i, "result": r},
+            ensure_ascii=False,
+        ) + "\n"
+
+    yield json.dumps({"type": "done", **_batch_summary(results)}, ensure_ascii=False) + "\n"
+
+
+@app.post("/api/detect-batch-stream")
+async def detect_batch_stream(req: DetectBatchRequest):
+    targets = parse_targets(req.targets)
+    if not targets:
+        raise HTTPException(status_code=400, detail="请输入至少一个 IP 或域名（支持换行或逗号分隔）")
+    if len(targets) > MAX_BATCH_TARGETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"一次最多支持检测 {MAX_BATCH_TARGETS} 个（本次输入了 {len(targets)} 个）",
+        )
+
+    coros = [_detect_single_target(t) for t in targets]
+    return StreamingResponse(_stream_progress(coros), media_type="application/x-ndjson")
 
 
 async def _detect_single_node(node: dict) -> dict:
@@ -498,11 +546,18 @@ async def detect_nodes(req: NodesDetectRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
     results = await asyncio.gather(*(_detect_single_node(n) for n in nodes))
-    return {
-        "total": len(results),
-        "success_count": sum(1 for r in results if r.get("success")),
-        "results": results,
-    }
+    return _batch_summary(results)
+
+
+@app.post("/api/detect-nodes-stream")
+async def detect_nodes_stream(req: NodesDetectRequest):
+    try:
+        nodes = clash_probe.parse_nodes(req.nodes)
+    except clash_probe.NodeProbeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    coros = [_detect_single_node(n) for n in nodes]
+    return StreamingResponse(_stream_progress(coros), media_type="application/x-ndjson")
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

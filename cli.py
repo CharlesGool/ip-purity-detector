@@ -157,6 +157,68 @@ def print_targets_table(data: dict):
         ])
 
 
+def render_progress(done: int, total: int):
+    """Draw an in-place progress bar on stderr (stdout is reserved for the
+    table/JSON output), so batches don't sit silent for the whole run."""
+    if not total or not sys.stderr.isatty():
+        return
+    width = 30
+    pct = max(0, min(1, done / total))
+    filled = int(width * pct)
+    bar = "#" * filled + "-" * (width - filled)
+    sys.stderr.write(f"\r检测进度 [{bar}] {done}/{total}")
+    sys.stderr.flush()
+    if done >= total:
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+
+
+def request_stream(url: str, path: str, payload: dict, timeout: float, on_progress=None) -> dict:
+    """POST to a streaming NDJSON endpoint, calling on_progress(done, total)
+    for each progress line, and returning the final `done` event's payload
+    (same shape as the non-streaming batch endpoints)."""
+    try:
+        resp = requests.post(f"{url.rstrip('/')}{path}", json=payload, timeout=timeout, stream=True)
+    except requests.exceptions.ConnectionError:
+        print(
+            f"错误: 无法连接到服务 {url}\n"
+            f"请确认服务已启动（例如 docker compose up -d），或用 --url 指定正确地址。",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except requests.exceptions.Timeout:
+        print(f"错误: 请求超时（{timeout}s）", file=sys.stderr)
+        sys.exit(1)
+
+    if not resp.ok:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except ValueError:
+            detail = resp.text
+        print(f"错误: {detail}", file=sys.stderr)
+        sys.exit(1)
+
+    final = None
+    try:
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            event = json.loads(line)
+            if event.get("type") == "progress":
+                if on_progress:
+                    on_progress(event.get("done", 0), event.get("total", 0))
+            elif event.get("type") == "done":
+                final = {k: v for k, v in event.items() if k != "type"}
+    except requests.exceptions.ChunkedEncodingError as e:
+        print(f"错误: 连接中断: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if final is None:
+        print("错误: 服务未返回完整结果", file=sys.stderr)
+        sys.exit(1)
+    return final
+
+
 def request(url: str, path: str, payload: dict, timeout: float) -> dict:
     try:
         resp = requests.post(f"{url.rstrip('/')}{path}", json=payload, timeout=timeout)
@@ -210,7 +272,10 @@ def cmd_ip(args):
         else:
             print_ip_result(data)
     else:
-        data = request(args.url, "/api/detect-batch", {"targets": text}, timeout=args.timeout)
+        data = request_stream(
+            args.url, "/api/detect-batch-stream", {"targets": text},
+            timeout=args.timeout, on_progress=render_progress,
+        )
         if args.json:
             print(json.dumps(data, ensure_ascii=False, indent=2))
         else:
@@ -231,7 +296,10 @@ def cmd_node(args):
         )
         sys.exit(1)
 
-    data = request(args.url, "/api/detect-nodes", {"nodes": text}, timeout=args.timeout)
+    data = request_stream(
+        args.url, "/api/detect-nodes-stream", {"nodes": text},
+        timeout=args.timeout, on_progress=render_progress,
+    )
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))
     elif data["total"] == 1:

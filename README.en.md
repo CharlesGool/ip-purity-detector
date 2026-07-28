@@ -2,6 +2,12 @@
 
 **[🇨🇳 中文文档 »](README.md)**
 
+> Why this project exists: once you've got more than a handful of proxy nodes, manually
+> checking each one on ippure.com gets old fast. This tool exists mainly to **batch-check
+> the purity of a whole pile of nodes at once** — run dozens or hundreds of Clash nodes
+> through it in one go, compare the results side by side, and quickly pick out the ones
+> with the best purity for daily use, instead of checking them one by one by hand.
+
 Give it an IP / domain / Clash proxy node config, and it checks the **purity** of the
 resulting egress IP. It drives a real headless browser to open
 `https://ippure.com/?ip=x.x.x.x` and scrapes the full report shown on that page (matching

@@ -176,6 +176,30 @@ def _build_config(node: dict, mixed_port: int) -> str:
         "mode": "rule",
         "log-level": "warning",
         "ipv6": False,
+        # Two problems this works around when this server itself sits behind
+        # the GFW:
+        # 1. Without an explicit `dns` block, mihomo may resolve the node's
+        #    own server hostname through its fake-ip pool (198.18.0.0/16)
+        #    instead of a real IP, so `enhanced-mode: normal` disables that.
+        # 2. Plain UDP DNS (port 53) gets MITM'd/poisoned by the GFW for
+        #    plenty of domains -- confirmed by hand: querying a blocked
+        #    node's hostname over UDP returned a bogus 198.18.x.x address
+        #    from *every* resolver (including domestic ones like AliDNS),
+        #    while the same query over DoH (DNS-over-HTTPS, which the GFW
+        #    can't tamper with as easily since it's wrapped in TLS) returned
+        #    the correct real IP and let mihomo actually reach the node.
+        #    So every nameserver below is DoH, not plain UDP.
+        "dns": {
+            "enable": True,
+            "ipv6": False,
+            "enhanced-mode": "normal",
+            "nameserver": [
+                "https://223.5.5.5/dns-query",
+                "https://120.53.53.53/dns-query",
+                "https://1.1.1.1/dns-query",
+                "https://8.8.8.8/dns-query",
+            ],
+        },
         "proxies": [node],
         "proxy-groups": [{"name": "PROXY", "type": "select", "proxies": [name]}],
         "rules": ["MATCH,PROXY"],

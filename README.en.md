@@ -20,6 +20,28 @@ exactly the same amount of detail as a single query. Both the Web UI and the CLI
 live progress bar (completed/total) during batch runs, so you're not left waiting blind
 until everything finishes.
 
+## Quick start
+
+```bash
+git clone https://github.com/CharlesGool/ip-purity-detector.git
+cd ip-purity-detector
+docker compose up -d --build
+```
+
+Open `http://<server-IP>:8000` in a browser, switch between the "IP / Domain Detection"
+and "Clash Node Detection" tabs, paste in the IP / domain you want to check (or a Clash
+node config), and hit the detect button. Within a few seconds to a few tens of seconds
+you'll get the full report — ASN, multi-source geolocation, human-vs-bot traffic ratio,
+IPPure / Cloudflare purity scores, WebRTC leak status, etc. Here's what that looks like
+(Clash node detection example, sensitive fields blurred out):
+
+![Clash node detection result screenshot](docs/screenshot.png)
+
+For batch checks (paste multiple IPs/domains or nodes at once, up to 1000 each), the
+`cli.py` CLI, and the HTTP API, see "CLI tool" / "API reference" below. Deploying on a
+brand-new machine for the first time? See "Deploying from scratch on a brand-new Linux
+machine" below.
+
 ## Why a headless browser instead of calling the API directly
 
 ippure.com's data endpoint is signed/encrypted (HMAC + AES) to stop scripts from calling

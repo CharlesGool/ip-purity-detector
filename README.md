@@ -16,6 +16,25 @@
 单个查询和批量查询（最多各 1000 个），批量时每一项返回的信息和单个查询完全一样多。批量查询
 时 Web UI 和 CLI 都会实时显示进度条（已完成/总数），不用干等到全部跑完才有反馈。
 
+## 快速开始
+
+```bash
+git clone https://github.com/CharlesGool/ip-purity-detector.git
+cd ip-purity-detector
+docker compose up -d --build
+```
+
+打开浏览器访问 `http://<服务器IP>:8000`，在「IP / 域名检测」或「Clash 节点检测」两个标签页
+之间切换，粘贴要检测的 IP / 域名，或者一段 Clash 节点配置，点击检测按钮，几秒到几十秒后就能
+看到完整报告（ASN、多源地理位置、人机流量比、IPPure / Cloudflare 纯净度系数、WebRTC 泄露
+等），效果如下图（Clash 节点检测示例，图中敏感信息已打码）：
+
+![Clash 节点检测结果截图](docs/screenshot.png)
+
+批量检测（一次粘贴多个 IP/域名或多个节点，最多各 1000 个）、命令行工具 `cli.py`、HTTP API
+的具体用法见下文「命令行工具」「接口说明」；如果是在一台全新的机器上第一次部署，见下文
+「在一台全新的 Linux 电脑上从零部署」。
+
 ## 为什么用无头浏览器而不是直接调用接口
 
 ippure.com 的数据接口做了签名/加密（HMAC + AES）防止被脚本直接调用，且逻辑在混淆过的前端

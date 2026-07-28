@@ -229,10 +229,16 @@ async def _block_heavy_resources(route):
         await route.continue_()
 
 
-async def fetch_purity(ip: str) -> dict:
+async def fetch_purity(ip: str, proxy: Optional[dict] = None) -> dict:
+    """Load the ippure.com report for `ip`. `proxy`, when given, routes this
+    browser context through it (a node's own local mihomo port) instead of
+    this server's direct network — ippure.com is blocked outright on some
+    networks (GFW), so node checks need to reach it via the node's own
+    tunnel rather than failing at this step regardless of the node itself
+    being fine."""
     browser: Browser = _state["browser"]
     async with _semaphore:
-        context = await browser.new_context(locale="zh-CN")
+        context = await browser.new_context(locale="zh-CN", proxy=proxy)
         try:
             page = await context.new_page()
             await page.route("**/*", _block_heavy_resources)
@@ -354,12 +360,12 @@ async def check_node_webrtc_leak(mixed_port: int) -> dict:
         await context.close()
 
 
-async def get_purity_with_retry(ip: str) -> dict:
+async def get_purity_with_retry(ip: str, proxy: Optional[dict] = None) -> dict:
     last_error: Optional[Exception] = None
     data = None
     for _ in range(MAX_RETRIES):
         try:
-            data = await fetch_purity(ip)
+            data = await fetch_purity(ip, proxy=proxy)
             if data.get("source") or data.get("attribute") or data.get("scoreText"):
                 break
         except Exception as e:  # noqa: BLE001 - surfaced to the client below
@@ -508,8 +514,9 @@ async def _detect_single_node(node: dict) -> dict:
             base["node_name"] = probe.get("node_name")
             base["egress_ip"] = ip
 
+            node_proxy = {"server": f"socks5://127.0.0.1:{handle.mixed_port}"}
             try:
-                data = await get_purity_with_retry(ip)
+                data = await get_purity_with_retry(ip, proxy=node_proxy)
             except HTTPException as e:
                 return {**base, "success": False, "error": str(e.detail)}
 
